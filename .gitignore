@@ -1,0 +1,22 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Python
+app/.venv/
+app/__pycache__/
+app/*.pyc
+app/**/__pycache__/
+app/**/*.pyc
+*.pyc
+__pycache__/
+
+# IDE
+.vscode/
+.idea/
+
+# Build artifacts
+*.elf
+*.bin
+*.hex
