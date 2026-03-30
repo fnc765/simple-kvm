@@ -122,3 +122,87 @@ python main.py
 | 映像が表示されない | Device インデックスを変更して試す。他のカメラアプリを終了する |
 | キー入力が届かない | UART クロス接続（PA9↔PA10）を確認 |
 | 偽チップ（64 KB Flash）エラー | STLink で書き込む。`Variant` を `BluePill F103C6` に変更して試す |
+
+---
+
+## PlatformIO によるビルド手順
+
+### 必要なツール
+
+- [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/index.html) のインストール
+  ```powershell
+  pip install platformio
+  ```
+- ST-Link デバッガー（書き込みに使用）
+
+### ビルド
+
+プロジェクトルートで実行：
+
+```powershell
+# 両方のファームウェアをビルド
+pio run
+
+# 環境を指定してビルド
+pio run -e bluepill1
+pio run -e bluepill2
+```
+
+### 書き込み
+
+BluePill を ST-Link で接続した状態で：
+
+```powershell
+# bluepill1 を書き込み
+pio run -e bluepill1 --target upload
+
+# bluepill2 を書き込み
+pio run -e bluepill2 --target upload
+```
+
+### ビルド成功時の目安
+
+| 環境 | RAM使用 | Flash使用 |
+|------|---------|-----------|
+| bluepill1 | ~22% (4.5KB) | ~42% (27KB) |
+| bluepill2 | ~18% (3.7KB) | ~36% (23KB) |
+
+---
+
+## Python ホストアプリの起動手順
+
+### 必要な環境
+
+- Python 3.11 以上
+
+### 初回セットアップ
+
+```powershell
+cd app
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### 起動
+
+```powershell
+cd app
+.venv\Scripts\activate
+python main.py
+```
+
+### 使い方
+
+1. **Settings ダイアログ** (File > Settings) でシリアルポートと HDMI キャプチャデバイスを選択して OK
+2. 映像エリアを **クリック** して KVM フォーカスモード入り（カーソルが消える）
+3. KVM フォーカスモード中はキーボード・マウス入力がターゲット PC に転送される
+4. **Esc キー** で KVM フォーカスモードを解除
+
+### インストール済みパッケージ（動作確認済み）
+
+| パッケージ | バージョン |
+|-----------|-----------|
+| PySide6 | 6.11.0 |
+| opencv-python | 4.13.0.92 |
+| pyserial | 3.5 |
