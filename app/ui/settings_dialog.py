@@ -9,6 +9,7 @@ import sys
 
 import cv2
 import serial.tools.list_ports
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -18,6 +19,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
 )
+
+from core.capture import CAP_BACKEND, enumerate_capture_formats
 
 
 class SettingsDialog(QDialog):
@@ -67,6 +70,14 @@ class SettingsDialog(QDialog):
             QLabel("(Device 0 is usually the first UVC / HDMI capture dongle)"),
         )
 
+        # ---- Capture format ------------------------------------------------
+        self._format_combo = QComboBox()
+        self._format_combo.addItem("Auto Detect (1080p)", userData=None)
+        self._detect_btn = QPushButton("Detect Formats")
+        self._detect_btn.clicked.connect(self._on_detect_formats)
+        layout.addRow("Capture Format:", self._format_combo)
+        layout.addRow("", self._detect_btn)
+
         # ---- Buttons -------------------------------------------------------
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -97,7 +108,6 @@ class SettingsDialog(QDialog):
             self._port_combo.setCurrentText(current)
 
     def _populate_devices(self) -> None:
-        from PySide6.QtCore import Qt
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             self._device_combo.clear()
@@ -120,14 +130,38 @@ class SettingsDialog(QDialog):
         finally:
             QApplication.restoreOverrideCursor()
 
+    def _on_detect_formats(self) -> None:
+        """選択中のデバイスの対応フォーマットを検出してコンボボックスを更新する。"""
+        device_index = self._device_combo.currentData()
+        if device_index is None:
+            return
+
+        self._detect_btn.setEnabled(False)
+        self._detect_btn.setText("Detecting…")
+        # UI を一時更新
+        QApplication.processEvents()
+
+        try:
+            formats = enumerate_capture_formats(device_index)
+        finally:
+            self._detect_btn.setEnabled(True)
+            self._detect_btn.setText("Detect Formats")
+
+        self._format_combo.clear()
+        self._format_combo.addItem("Auto Detect (1080p)", userData=None)
+        for w, h, fps in formats:
+            label = f"{w}×{h} @ {fps}fps"
+            self._format_combo.addItem(label, userData=(w, h, fps))
+
     # ------------------------------------------------------------------
     # Result accessors
     # ------------------------------------------------------------------
 
-    def get_values(self) -> tuple[str, int]:
-        """Return *(selected_port, selected_device_index)*."""
+    def get_values(self) -> tuple[str, int, tuple[int, int, int] | None]:
+        """Return *(selected_port, selected_device_index, capture_format)*."""
         port   = self._port_combo.currentText()
         device = self._device_combo.currentData()
         if device is None:
             device = 0
-        return port, int(device)
+        capture_format = self._format_combo.currentData()
+        return port, int(device), capture_format
