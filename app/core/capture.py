@@ -20,6 +20,85 @@ CAP_BACKEND = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
 _MAX_CONSECUTIVE_FAILURES = 30
 
 
+def _detect_best_1080p_fps(cap: cv2.VideoCapture) -> int:
+    """MJPEG + 1920x1080 で対応する最高 fps を検出して返す。
+
+    fps 候補を高い順に試し、実際のフレーム取得速度が要求値の 70% 以上であれば
+    その fps を採用する。全候補で達成できなければ 15 を返す。
+    """
+    candidates = [60, 50, 30, 25, 20, 15]
+
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+
+    for fps in candidates:
+        cap.set(cv2.CAP_PROP_FPS, fps)
+
+        # ウォームアップ（2フレーム破棄）
+        for _ in range(2):
+            cap.grab()
+
+        # 実測（5フレーム計測）
+        start = time.perf_counter()
+        acquired = 0
+        for _ in range(5):
+            if cap.grab():
+                acquired += 1
+        elapsed = time.perf_counter() - start
+
+        if acquired < 3:
+            continue  # フレームが取れない
+
+        actual_fps = acquired / elapsed
+        if actual_fps >= fps * 0.70:
+            return fps
+
+    return 15  # フォールバック
+
+
+def enumerate_capture_formats(
+    device_index: int,
+    backend: int = CAP_BACKEND,
+) -> list[tuple[int, int, int]]:
+    """デバイスが対応する (width, height, fps) の組み合わせを列挙して返す。
+
+    MJPEG フォーマットで各解像度・fps の組み合わせを実測し、
+    実際に取得できたものだけをリストアップする。
+    """
+    RESOLUTIONS = [(1920, 1080), (1280, 720), (640, 480)]
+    FPS_CANDIDATES = [60, 30, 15]
+
+    cap = cv2.VideoCapture(device_index, backend)
+    supported: list[tuple[int, int, int]] = []
+
+    try:
+        if not cap.isOpened():
+            return []
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        for w, h in RESOLUTIONS:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+
+            for fps in FPS_CANDIDATES:
+                cap.set(cv2.CAP_PROP_FPS, fps)
+
+                # ウォームアップ (2フレーム破棄)
+                for _ in range(2):
+                    cap.grab()
+
+                # 実測 (3フレーム)
+                start = time.perf_counter()
+                count = sum(1 for _ in range(3) if cap.grab())
+                elapsed = time.perf_counter() - start
+
+                if count >= 2 and elapsed > 0 and count / elapsed >= fps * 0.65:
+                    supported.append((w, h, fps))
+    finally:
+        cap.release()
+
+    return supported
+
+
 class CaptureThread(QThread):
     """
     Background thread that continuously reads frames from an OpenCV capture
@@ -38,6 +117,9 @@ class CaptureThread(QThread):
     def __init__(self, device_index: int = 0, parent=None) -> None:
         super().__init__(parent)
         self._device_index = device_index
+        self._capture_width: int | None = None
+        self._capture_height: int | None = None
+        self._capture_fps: int | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -46,6 +128,17 @@ class CaptureThread(QThread):
     def set_device(self, index: int) -> None:
         """Update the capture device index (takes effect on next start)."""
         self._device_index = index
+
+    def set_format(
+        self,
+        width: int | None,
+        height: int | None,
+        fps: int | None,
+    ) -> None:
+        """キャプチャフォーマットを設定する (None の場合は自動検出)。"""
+        self._capture_width = width
+        self._capture_height = height
+        self._capture_fps = fps
 
     def stop(self) -> None:
         """Request the thread to stop and wait for it to finish."""
@@ -65,7 +158,15 @@ class CaptureThread(QThread):
         try:
             # Minimise buffering for the lowest possible latency
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            cap.set(cv2.CAP_PROP_FPS, 60)
+            # 高画質のためMJPEGフォーマットを要求（YUY2よりUSB帯域が少なく高解像度に対応）
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            if self._capture_width and self._capture_height and self._capture_fps:
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._capture_width)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._capture_height)
+                cap.set(cv2.CAP_PROP_FPS, self._capture_fps)
+            else:
+                best_fps = _detect_best_1080p_fps(cap)
+                cap.set(cv2.CAP_PROP_FPS, best_fps)
 
             frame_count          = 0
             fps_ts               = time.monotonic()
@@ -82,12 +183,10 @@ class CaptureThread(QThread):
                     continue
                 consecutive_failures = 0
 
-                # Resize to the display resolution
-                frame_resized = cv2.resize(frame, (640, 480))
-                frame_rgb     = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+                frame_rgb      = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                h, w, ch = frame_rgb.shape
-                bytes_per_line = ch * w
+                h, w = frame_rgb.shape[:2]
+                bytes_per_line = int(frame_rgb.strides[0])
                 # .copy() is essential: QImage does not own the NumPy buffer
                 qimage = QImage(
                     frame_rgb.data, w, h, bytes_per_line,
