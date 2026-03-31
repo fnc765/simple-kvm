@@ -26,7 +26,7 @@ When the user clicks inside the VideoWidget:
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, Qt, QTimer
+from PySide6.QtCore import QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import (
     QCursor,
     QImage,
@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMenuBar,
+    QSizePolicy,
     QStatusBar,
 )
 
@@ -57,10 +58,32 @@ class VideoWidget(QLabel):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setFixedSize(640, 480)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumSize(320, 240)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setStyleSheet("background: #111;")
         self.setText("No Signal – click to start capture")
+        self._pixmap: QPixmap | None = None  # オリジナルピクスマップを保持
+
+    def _update_scaled_pixmap(self) -> None:
+        if self._pixmap is None:
+            return
+        dpr = self.devicePixelRatioF()
+        target = QSize(
+            int(self.width() * dpr),
+            int(self.height() * dpr)
+        )
+        scaled = self._pixmap.scaled(
+            target,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        scaled.setDevicePixelRatio(dpr)
+        self.setPixmap(scaled)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_scaled_pixmap()
 
 
 class MainWindow(QMainWindow):
@@ -108,6 +131,7 @@ class MainWindow(QMainWindow):
         # ---- Stored settings ------------------------------------------------
         self._port           = ""
         self._capture_index  = 0
+        self._capture_format: tuple[int, int, int] | None = None
         self._connected      = False
 
         # ---- Heartbeat timer ------------------------------------------------
@@ -131,10 +155,11 @@ class MainWindow(QMainWindow):
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self._port, self._capture_index, self)
         if dlg.exec():
-            port, device = dlg.get_values()
-            if port != self._port or device != self._capture_index:
-                self._port          = port
-                self._capture_index = device
+            port, device, fmt = dlg.get_values()
+            if port != self._port or device != self._capture_index or fmt != self._capture_format:
+                self._port           = port
+                self._capture_index  = device
+                self._capture_format = fmt
                 self._apply_settings()
 
     def _apply_settings(self) -> None:
@@ -149,6 +174,10 @@ class MainWindow(QMainWindow):
         # Restart capture
         self._capture.stop()
         self._capture.set_device(self._capture_index)
+        if self._capture_format:
+            self._capture.set_format(*self._capture_format)
+        else:
+            self._capture.set_format(None, None, None)
         self._capture.start()
 
     # -------------------------------------------------------------------------
@@ -164,13 +193,8 @@ class MainWindow(QMainWindow):
 
     def _on_frame_ready(self, image: QImage) -> None:
         pixmap = QPixmap.fromImage(image)
-        self._video_widget.setPixmap(
-            pixmap.scaled(
-                self._video_widget.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-        )
+        self._video_widget._pixmap = pixmap
+        self._video_widget._update_scaled_pixmap()
 
     def _on_fps_update(self, fps: float) -> None:
         port_part = f"Connected: {self._port}" if self._connected else "Disconnected"
