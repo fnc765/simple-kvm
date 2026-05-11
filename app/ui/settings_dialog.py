@@ -5,8 +5,6 @@ settings_dialog.py – Serial port & capture device selection dialog.
 from __future__ import annotations
 
 import re
-import sys
-
 import cv2
 import serial.tools.list_ports
 from PySide6.QtCore import Qt
@@ -111,7 +109,7 @@ class SettingsDialog(QDialog):
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             self._device_combo.clear()
-            backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
+            backend = CAP_BACKEND
             consecutive_failures = 0
             for i in range(10):
                 cap = cv2.VideoCapture(i, backend)

@@ -14,17 +14,26 @@ import cv2
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QImage
 
-# Use DirectShow on Windows for lower latency; fall back to platform default
+# DSHOW is the most reliable backend on Windows for USB 3.0 UVC capture
+# dongles -- it never hangs, though some devices are limited to ~5 fps.
+# CAP_ANY (which tries MSMF first on Windows 10+) can deliver 30+ fps
+# on supported devices but may hang indefinitely on others.
 CAP_BACKEND = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
 
 _MAX_CONSECUTIVE_FAILURES = 30
 
 
 def _detect_best_1080p_fps(cap: cv2.VideoCapture) -> int:
-    """MJPEG + 1920x1080 で対応する最高 fps を検出して返す。
+    """1920x1080 で対応する最高 fps を検出して返す。
 
     fps 候補を高い順に試し、実際のフレーム取得速度が要求値の 70% 以上であれば
     その fps を採用する。全候補で達成できなければ 15 を返す。
+
+    ``cap.grab()`` を用いてデバイスからのフレーム到着速度を計測する。
+    DSHOW バックエンドでは実際の ``read()`` 速度と乖離する場合があるが、
+    検出フェーズで数秒のブロックが発生すると closeEvent の
+    スレッド停止がタイムアウトするため、高速な grab() を採用する。
+    実効 FPS はキャプチャループ側で実測されステータスバーに表示される。
     """
     candidates = [60, 50, 30, 25, 20, 15]
 
@@ -38,16 +47,16 @@ def _detect_best_1080p_fps(cap: cv2.VideoCapture) -> int:
         for _ in range(2):
             cap.grab()
 
-        # 実測（5フレーム計測）
+        # 実測（3フレーム計測）
         start = time.perf_counter()
         acquired = 0
-        for _ in range(5):
+        for _ in range(3):
             if cap.grab():
                 acquired += 1
         elapsed = time.perf_counter() - start
 
-        if acquired < 3:
-            continue  # フレームが取れない
+        if acquired < 2:
+            continue
 
         actual_fps = acquired / elapsed
         if actual_fps >= fps * 0.70:
@@ -62,8 +71,9 @@ def enumerate_capture_formats(
 ) -> list[tuple[int, int, int]]:
     """デバイスが対応する (width, height, fps) の組み合わせを列挙して返す。
 
-    MJPEG フォーマットで各解像度・fps の組み合わせを実測し、
+    各解像度・fps の組み合わせを実測し、
     実際に取得できたものだけをリストアップする。
+    フォーマットはバックエンドの自動選択に任せる。
     """
     RESOLUTIONS = [(1920, 1080), (1280, 720), (640, 480)]
     FPS_CANDIDATES = [60, 30, 15]
@@ -74,7 +84,6 @@ def enumerate_capture_formats(
     try:
         if not cap.isOpened():
             return []
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         for w, h in RESOLUTIONS:
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
@@ -143,7 +152,7 @@ class CaptureThread(QThread):
     def stop(self) -> None:
         """Request the thread to stop and wait for it to finish."""
         self.requestInterruption()
-        self.wait()
+        self.wait(3_000)
 
     # ------------------------------------------------------------------
     # QThread entry point
@@ -158,8 +167,10 @@ class CaptureThread(QThread):
         try:
             # Minimise buffering for the lowest possible latency
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            # 高画質のためMJPEGフォーマットを要求（YUY2よりUSB帯域が少なく高解像度に対応）
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            # Do NOT force a FOURCC codec -- let the backend auto-negotiate
+            # the best format.  Forcing MJPEG (or any codec) can prevent
+            # the Media Foundation backend from using its hardware-optimised
+            # decoder, which may drop the effective frame rate to 5 fps.
             if self._capture_width and self._capture_height and self._capture_fps:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._capture_width)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._capture_height)

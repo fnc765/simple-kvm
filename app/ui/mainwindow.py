@@ -102,7 +102,7 @@ class MainWindow(QMainWindow):
         # ---- Status bar -----------------------------------------------------
         self._status = QStatusBar()
         self.setStatusBar(self._status)
-        self._status.showMessage("Disconnected – open File > Settings to connect")
+        self._status.showMessage("Ready – open File > Settings to configure")
 
         # ---- Menu bar -------------------------------------------------------
         menu_bar = QMenuBar(self)
@@ -396,7 +396,5 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         self._set_kvm_active(False)
         self._capture.stop()
-        self._capture.wait(2000)
         self._serial.stop()
-        self._serial.wait(2000)
         super().closeEvent(event)

@@ -62,7 +62,7 @@ class SerialComm(QThread):
     def stop(self) -> None:
         """Request shutdown and wait for the thread to finish."""
         self.requestInterruption()
-        self.wait()
+        self.wait(3_000)
 
     # ------------------------------------------------------------------
     # QThread entry point
