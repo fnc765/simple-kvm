@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
     QStatusBar,
 )
 
-from core.capture import CaptureThread
+from core.capture import CaptureThread, DEFAULT_DEVICE, DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_FPS
 from core.input_hook import InputState
 from core.keymap import get_modifier_bit, is_modifier_key, qt_key_to_hid
 from core.protocol import build_heartbeat, build_keyboard_report, build_mouse_report
@@ -124,14 +124,13 @@ class MainWindow(QMainWindow):
         self._serial.connected.connect(self._on_serial_connected)
 
         # ---- Capture thread -------------------------------------------------
-        self._capture = CaptureThread(0, self)
+        self._capture = CaptureThread(DEFAULT_DEVICE, self)
         self._capture.frame_ready.connect(self._on_frame_ready)
         self._capture.fps_updated.connect(self._on_fps_update)
 
         # ---- Stored settings ------------------------------------------------
         self._port           = ""
-        self._capture_index  = 0
-        self._capture_format: tuple[int, int, int] | None = None
+        self._capture_device = DEFAULT_DEVICE
         self._connected      = False
 
         # ---- Heartbeat timer ------------------------------------------------
@@ -153,13 +152,12 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------------
 
     def _open_settings(self) -> None:
-        dlg = SettingsDialog(self._port, self._capture_index, self)
+        dlg = SettingsDialog(self._port, self._capture_device, self)
         if dlg.exec():
-            port, device, fmt = dlg.get_values()
-            if port != self._port or device != self._capture_index or fmt != self._capture_format:
+            port, device_name = dlg.get_values()
+            if port != self._port or device_name != self._capture_device:
                 self._port           = port
-                self._capture_index  = device
-                self._capture_format = fmt
+                self._capture_device = device_name
                 self._apply_settings()
 
     def _apply_settings(self) -> None:
@@ -171,13 +169,10 @@ class MainWindow(QMainWindow):
             self._serial.set_port(self._port)
             self._serial.start()
 
-        # Restart capture
+        # Restart capture (PyAV always uses 1080p @ 30fps)
         self._capture.stop()
-        self._capture.set_device(self._capture_index)
-        if self._capture_format:
-            self._capture.set_format(*self._capture_format)
-        else:
-            self._capture.set_format(None, None, None)
+        self._capture.set_device(self._capture_device)
+        self._capture.set_format(DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_FPS)
         self._capture.start()
 
     # -------------------------------------------------------------------------

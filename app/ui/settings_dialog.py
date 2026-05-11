@@ -1,11 +1,11 @@
 """
-settings_dialog.py – Serial port & capture device selection dialog.
+settings_dialog.py -- Serial port & capture device selection dialog.
 """
 
 from __future__ import annotations
 
 import re
-import cv2
+
 import serial.tools.list_ports
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -18,20 +18,21 @@ from PySide6.QtWidgets import (
     QPushButton,
 )
 
-from core.capture import CAP_BACKEND, enumerate_capture_formats
+from core.capture import list_dshow_devices
 
 
 class SettingsDialog(QDialog):
-    """
-    Modal dialog that lets the user choose:
-    - the COM port connected to BluePill #1
-    - the OpenCV device index for the HDMI capture dongle
+    """Modal dialog for choosing the COM port and capture device.
+
+    The capture device is selected by name (e.g. ``"USB3. 0 capture"``)
+    rather than by numeric index, because PyAV/FFmpeg identifies
+    DirectShow devices by their friendly name.
     """
 
     def __init__(
         self,
-        current_port: str   = "",
-        current_device: int = 0,
+        current_port: str = "",
+        current_device: str = "",
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -58,23 +59,15 @@ class SettingsDialog(QDialog):
         # ---- Capture device ------------------------------------------------
         self._device_combo = QComboBox()
         self._populate_devices()
-        idx = self._device_combo.findData(current_device)
+        idx = self._device_combo.findText(current_device)
         if idx >= 0:
             self._device_combo.setCurrentIndex(idx)
 
         layout.addRow("Capture Device:", self._device_combo)
         layout.addRow(
             "",
-            QLabel("(Device 0 is usually the first UVC / HDMI capture dongle)"),
+            QLabel("Capture is always 1920x1080 @ 30 fps via FFmpeg"),
         )
-
-        # ---- Capture format ------------------------------------------------
-        self._format_combo = QComboBox()
-        self._format_combo.addItem("Auto Detect (1080p)", userData=None)
-        self._detect_btn = QPushButton("Detect Formats")
-        self._detect_btn.clicked.connect(self._on_detect_formats)
-        layout.addRow("Capture Format:", self._format_combo)
-        layout.addRow("", self._detect_btn)
 
         # ---- Buttons -------------------------------------------------------
         buttons = QDialogButtonBox(
@@ -94,13 +87,13 @@ class SettingsDialog(QDialog):
         self._port_combo.clear()
 
         def _port_num(p) -> int:
-            m = re.search(r'\d+', p.device)
+            m = re.search(r"\d+", p.device)
             return int(m.group()) if m else 0
 
-        ports = [p.device for p in sorted(
-            serial.tools.list_ports.comports(),
-            key=_port_num,
-        )]
+        ports = [
+            p.device
+            for p in sorted(serial.tools.list_ports.comports(), key=_port_num)
+        ]
         self._port_combo.addItems(ports)
         if current in ports:
             self._port_combo.setCurrentText(current)
@@ -109,57 +102,17 @@ class SettingsDialog(QDialog):
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             self._device_combo.clear()
-            backend = CAP_BACKEND
-            consecutive_failures = 0
-            for i in range(10):
-                cap = cv2.VideoCapture(i, backend)
-                if cap.isOpened():
-                    self._device_combo.addItem(f"Device {i}", i)
-                    cap.release()
-                    consecutive_failures = 0
-                else:
-                    cap.release()
-                    consecutive_failures += 1
-                    if consecutive_failures >= 3:
-                        break
-
-            if self._device_combo.count() == 0:
-                self._device_combo.addItem("Device 0 (not detected)", 0)
+            devices = list_dshow_devices()
+            self._device_combo.addItems(devices)
         finally:
             QApplication.restoreOverrideCursor()
-
-    def _on_detect_formats(self) -> None:
-        """選択中のデバイスの対応フォーマットを検出してコンボボックスを更新する。"""
-        device_index = self._device_combo.currentData()
-        if device_index is None:
-            return
-
-        self._detect_btn.setEnabled(False)
-        self._detect_btn.setText("Detecting…")
-        # UI を一時更新
-        QApplication.processEvents()
-
-        try:
-            formats = enumerate_capture_formats(device_index)
-        finally:
-            self._detect_btn.setEnabled(True)
-            self._detect_btn.setText("Detect Formats")
-
-        self._format_combo.clear()
-        self._format_combo.addItem("Auto Detect (1080p)", userData=None)
-        for w, h, fps in formats:
-            label = f"{w}×{h} @ {fps}fps"
-            self._format_combo.addItem(label, userData=(w, h, fps))
 
     # ------------------------------------------------------------------
     # Result accessors
     # ------------------------------------------------------------------
 
-    def get_values(self) -> tuple[str, int, tuple[int, int, int] | None]:
-        """Return *(selected_port, selected_device_index, capture_format)*."""
-        port   = self._port_combo.currentText()
-        device = self._device_combo.currentData()
-        if device is None:
-            device = 0
-        capture_format = self._format_combo.currentData()
-        return port, int(device), capture_format
+    def get_values(self) -> tuple[str, str]:
+        """Return *(selected_port, selected_device_name)*."""
+        port = self._port_combo.currentText()
+        device = self._device_combo.currentText()
+        return port, device
