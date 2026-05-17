@@ -211,16 +211,16 @@ _SCANCODE_TO_HID: dict[int | tuple[int, int], int] = {
     0x37:         0x55,  # KP *
     0x4A:         0x56,  # KP -
     0x4E:         0x57,  # KP +
-    0x52:         0x62,  # KP 0 / Insert
-    0x4F:         0x61,  # KP 1 / End
-    0x50:         0x60,  # KP 2 / Down
-    0x51:         0x5F,  # KP 3 / PgDn
-    0x4B:         0x5E,  # KP 4 / Left
-    0x4C:         0x5D,  # KP 5 (centre, no dual mapping)
-    0x4D:         0x5C,  # KP 6 / Right
-    0x47:         0x5B,  # KP 7 / Home
-    0x48:         0x5A,  # KP 8 / Up
-    0x49:         0x59,  # KP 9 / PgUp
+    0x52:         0x62,  # KP 0
+    0x4F:         0x59,  # KP 1
+    0x50:         0x5A,  # KP 2
+    0x51:         0x5B,  # KP 3
+    0x4B:         0x5C,  # KP 4
+    0x4C:         0x5D,  # KP 5
+    0x4D:         0x5E,  # KP 6
+    0x47:         0x5F,  # KP 7
+    0x48:         0x60,  # KP 8
+    0x49:         0x61,  # KP 9
     # KP . (make code 0x53, no E0 prefix).
     # Note: E0 0x53 is ambiguous (Delete vs KP .) and is mapped to
     # Delete (0x4C) below. Most keyboards send non-E0 0x53 for KP .
@@ -344,6 +344,29 @@ _VK_TO_MODIFIER: dict[int, int] = {
     0x5C: 0x80,  # VK_RWIN      → Right GUI (Windows)
 }
 
+# ---------------------------------------------------------------------------
+# Virtual-Key → HID Usage ID for numpad keys  (USB keyboard E0 disambiguation)
+# ---------------------------------------------------------------------------
+# USB keyboards send numpad keys with the E0 prefix, which makes their scan
+# codes indistinguishable from the navigation cluster (Ins/Del/Home/End/…).
+# The OS resolves the correct virtual key (e.g. VK_NUMPAD1 vs VK_END) and
+# passes it in the VKey field of RAWKEYBOARD, so we can use VK to override
+# the scancode lookup and produce the correct HID Usage ID.
+
+_VK_NUMPAD_TO_HID: dict[int, int] = {
+    0x60: 0x62,  # VK_NUMPAD0  → KP 0
+    0x61: 0x59,  # VK_NUMPAD1  → KP 1
+    0x62: 0x5A,  # VK_NUMPAD2  → KP 2
+    0x63: 0x5B,  # VK_NUMPAD3  → KP 3
+    0x64: 0x5C,  # VK_NUMPAD4  → KP 4
+    0x65: 0x5D,  # VK_NUMPAD5  → KP 5
+    0x66: 0x5E,  # VK_NUMPAD6  → KP 6
+    0x67: 0x5F,  # VK_NUMPAD7  → KP 7
+    0x68: 0x60,  # VK_NUMPAD8  → KP 8
+    0x69: 0x61,  # VK_NUMPAD9  → KP 9
+    0x6E: 0x63,  # VK_DECIMAL  → KP .
+}
+
 
 # ---------------------------------------------------------------------------
 # Qt.KeyboardModifier → HID modifier bitmask
@@ -410,19 +433,29 @@ def is_modifier_key(qt_key: int) -> bool:
 # Raw Input helpers (scancode / VK → HID)
 # ---------------------------------------------------------------------------
 
-def scancode_to_hid(scancode: int, is_e0: bool) -> int:
+def scancode_to_hid(scancode: int, is_e0: bool, vk: int = 0) -> int:
     """
     Convert a Windows Set-1 scan code + E0 flag to a HID Usage ID.
 
     Args:
         scancode: The MakeCode field from RAWKEYBOARD (0x01–0x7F).
         is_e0: True if the RI_KEY_E0 flag was set in the raw input.
+        vk: The VKey field from RAWKEYBOARD.  Used to disambiguate
+            numpad keys (which carry the E0 prefix on USB keyboards)
+            from the navigation cluster that shares the same scan codes.
 
     Returns:
         HID Usage ID (0x04–0xFF), or 0 if the key is not mapped.
         Modifier keys return their HID usage (0xE0–0xE7) but should be
         routed through vk_to_modifier() instead for the modifier byte.
     """
+    # E0-prefixed scan codes are ambiguous on USB keyboards (numpad vs
+    # navigation cluster).  Resolve via the OS-supplied virtual key first.
+    if is_e0 and vk:
+        hid = _VK_NUMPAD_TO_HID.get(vk)
+        if hid:
+            return hid
+
     if is_e0:
         key: int | tuple[int, int] = (0xE0, scancode)
     else:

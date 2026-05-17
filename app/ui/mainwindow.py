@@ -481,7 +481,7 @@ class MainWindow(QMainWindow):
             changed = self._input_state.press_modifier(mod_bit)
         else:
             # Regular keys: scan code → HID usage ID
-            hid = scancode_to_hid(scancode, is_e0)
+            hid = scancode_to_hid(scancode, is_e0, vk)
             if hid:
                 changed = self._input_state.press_key(hid)
 
@@ -499,7 +499,7 @@ class MainWindow(QMainWindow):
         if mod_bit:
             changed = self._input_state.release_modifier(mod_bit)
         else:
-            hid = scancode_to_hid(scancode, is_e0)
+            hid = scancode_to_hid(scancode, is_e0, vk)
             if hid:
                 changed = self._input_state.release_key(hid)
 
