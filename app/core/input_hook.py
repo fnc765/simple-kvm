@@ -264,7 +264,9 @@ class RawInputHook:
             lparam, self.RID_INPUT, None,
             ctypes.byref(size), HEADER_SIZE,
         )
-        if ret == 0xFFFFFFFF or ret == 0:
+        # ret == 0 means SUCCESS for size query (pData=NULL).
+        # Error is only (UINT)-1 = 0xFFFFFFFF.
+        if ret == 0xFFFFFFFF or ret == -1:
             return False
 
         buf = ctypes.create_string_buffer(size.value)

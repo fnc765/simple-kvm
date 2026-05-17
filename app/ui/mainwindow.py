@@ -364,6 +364,12 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------------
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        # Esc always exits KVM focus mode — this MUST run before the
+        # _use_raw_input guard so it works even when Raw Input is broken.
+        if event.key() == Qt.Key.Key_Escape and self._kvm_active:
+            self._set_kvm_active(False)
+            return
+
         # When Raw Input is active, skip Qt keyboard events entirely
         # to avoid double-sending every keystroke.
         if self._use_raw_input and self._kvm_active:
@@ -371,27 +377,24 @@ class MainWindow(QMainWindow):
 
         key = event.key()
 
-        # Esc always exits focus mode
-        if key == Qt.Key.Key_Escape and self._kvm_active:
-            self._set_kvm_active(False)
-            return
-
         if not self._kvm_active:
             super().keyPressEvent(event)
             return
 
         # Update modifier or key state
+        changed = False
         if is_modifier_key(key):
             bit = get_modifier_bit(key)
             if bit is not None:
-                self._input_state.press_modifier(bit)
+                changed = self._input_state.press_modifier(bit)
         else:
             hid = qt_key_to_hid(key)
             if hid:
-                self._input_state.press_key(hid)
+                changed = self._input_state.press_key(hid)
 
-        modifier, keys = self._input_state.get_keyboard_report()
-        self._serial.enqueue(build_keyboard_report(modifier, keys))
+        if changed:
+            modifier, keys = self._input_state.get_keyboard_report()
+            self._serial.enqueue(build_keyboard_report(modifier, keys))
 
     def keyReleaseEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         # When Raw Input is active, skip Qt keyboard events.
@@ -405,18 +408,20 @@ class MainWindow(QMainWindow):
         if event.isAutoRepeat():
             return
 
+        changed = False
         key = event.key()
         if is_modifier_key(key):
             bit = get_modifier_bit(key)
             if bit is not None:
-                self._input_state.release_modifier(bit)
+                changed = self._input_state.release_modifier(bit)
         else:
             hid = qt_key_to_hid(key)
             if hid:
-                self._input_state.release_key(hid)
+                changed = self._input_state.release_key(hid)
 
-        modifier, keys = self._input_state.get_keyboard_report()
-        self._serial.enqueue(build_keyboard_report(modifier, keys))
+        if changed:
+            modifier, keys = self._input_state.get_keyboard_report()
+            self._serial.enqueue(build_keyboard_report(modifier, keys))
 
     # -------------------------------------------------------------------------
     # Raw Input (Windows) – native event interception
@@ -461,39 +466,46 @@ class MainWindow(QMainWindow):
     def _on_raw_key_down(self, scancode: int, vk: int, _flags: int,
                          is_e0: bool) -> None:
         """Raw Input keyboard press callback."""
+        if not self._kvm_active:
+            return
+
         # Escape always exits KVM focus mode
         if scancode == 0x01:  # Esc
             self._set_kvm_active(False)
             return
 
         # Modifier keys: use VK → modifier bit (full L/R discrimination)
+        changed = False
         mod_bit = vk_to_modifier(vk)
         if mod_bit:
-            self._input_state.press_modifier(mod_bit)
+            changed = self._input_state.press_modifier(mod_bit)
         else:
             # Regular keys: scan code → HID usage ID
             hid = scancode_to_hid(scancode, is_e0)
             if hid:
-                self._input_state.press_key(hid)
+                changed = self._input_state.press_key(hid)
 
-        modifier, keys = self._input_state.get_keyboard_report()
-        self._serial.enqueue(build_keyboard_report(modifier, keys))
+        if changed:
+            modifier, keys = self._input_state.get_keyboard_report()
+            self._serial.enqueue(build_keyboard_report(modifier, keys))
 
     def _on_raw_key_up(self, scancode: int, vk: int, _flags: int,
                        is_e0: bool) -> None:
         """Raw Input keyboard release callback."""
         if not self._kvm_active:
             return
+        changed = False
         mod_bit = vk_to_modifier(vk)
         if mod_bit:
-            self._input_state.release_modifier(mod_bit)
+            changed = self._input_state.release_modifier(mod_bit)
         else:
             hid = scancode_to_hid(scancode, is_e0)
             if hid:
-                self._input_state.release_key(hid)
+                changed = self._input_state.release_key(hid)
 
-        modifier, keys = self._input_state.get_keyboard_report()
-        self._serial.enqueue(build_keyboard_report(modifier, keys))
+        if changed:
+            modifier, keys = self._input_state.get_keyboard_report()
+            self._serial.enqueue(build_keyboard_report(modifier, keys))
 
     # -------------------------------------------------------------------------
     # Focus / close
