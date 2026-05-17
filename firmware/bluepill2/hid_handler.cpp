@@ -14,7 +14,7 @@ bool validate_keyboard_report(const uint8_t *payload, uint8_t len)
     for (uint8_t i = 2; i < 8; i++) {
         uint8_t kc = payload[i];
         if (kc == 0x00) continue;
-        if (kc >= 0x04 && kc <= 0x73) continue;
+        if ((kc >= 0x04 && kc <= 0x73) || (kc >= 0x88 && kc <= 0x94)) continue;
         return false;
     }
 
