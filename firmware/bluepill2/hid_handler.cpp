@@ -4,6 +4,7 @@
 
 bool validate_keyboard_report(const uint8_t *payload, uint8_t len)
 {
+    // Caller already checks p->len == PKT_LEN_KEYBOARD
     if (len < 8) return false;
 
     // Byte 1 (reserved) must be 0x00 per HID Boot Keyboard spec

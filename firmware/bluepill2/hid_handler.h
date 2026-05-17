@@ -31,6 +31,9 @@ typedef struct __attribute__((packed)) {
  *   [2] dy       – int8  relative Y  (-127..+127)
  *   [3] wheel_v  – int8  vertical scroll
  *   [4] wheel_h  – int8  horizontal scroll (not all targets support)
+ *
+ * NOTE: This struct documents the wire format. hid_send_mouse() uses
+ * memcpy into a local buffer for alignment safety instead of direct cast.
  */
 typedef struct __attribute__((packed)) {
     uint8_t buttons;

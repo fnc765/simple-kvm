@@ -25,10 +25,6 @@ static Packet       g_pkt;
 static uint32_t g_hb_last  = 0;
 static bool     g_led_on   = false;
 
-// Error indication
-static uint32_t g_err_last  = 0;
-static uint8_t  g_err_count = 0;
-
 // ----- Helpers ---------------------------------------------------------------
 
 /**
@@ -81,19 +77,6 @@ void loop()
         digitalWrite(LED_PIN, g_led_on ? LOW : HIGH);
     }
 
-    // ---- Error blink: rapid 3× blink on parse error -----------------------
-    if (g_err_count > 0 && now - g_err_last >= 100UL) {
-        g_err_last = now;
-        g_err_count--;
-        // Override heartbeat LED temporarily
-        digitalWrite(LED_PIN, (g_err_count % 2 == 0) ? HIGH : LOW);
-        if (g_err_count == 0) {
-            // Sync LED state after error blink completes
-            g_led_on = false;
-            digitalWrite(LED_PIN, HIGH);
-        }
-    }
-
     // ---- USB CDC → parse → UART1 forward ----------------------------------
     while (Serial.available()) {
         uint8_t b = (uint8_t)Serial.read();
@@ -104,6 +87,6 @@ void loop()
         // only completed+validated packets return true. No error here.
     }
 
-    // ---- (Optional) UART1 → USB CDC passthrough for ACK / debug ----------
+    // TODO: UART1 → USB CDC passthrough for ACK / debug (future use)
     // while (Serial1.available()) { Serial.write(Serial1.read()); }
 }

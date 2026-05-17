@@ -167,7 +167,7 @@ class MainWindow(QMainWindow):
         self.setMouseTracking(True)
         self._video_widget.setMouseTracking(True)
 
-        self.resize(640, self._video_widget.height() + 60)
+        self.resize(640, 480 + 60)
 
         # Focus-loss guard: deactivate KVM when any other window gains focus
         QApplication.instance().focusChanged.connect(self._on_focus_changed)
@@ -482,6 +482,8 @@ class MainWindow(QMainWindow):
     def _on_raw_key_up(self, scancode: int, vk: int, _flags: int,
                        is_e0: bool) -> None:
         """Raw Input keyboard release callback."""
+        if not self._kvm_active:
+            return
         mod_bit = vk_to_modifier(vk)
         if mod_bit:
             self._input_state.release_modifier(mod_bit)
