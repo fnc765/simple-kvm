@@ -4,8 +4,8 @@
 
 // ---------------------------------------------------------------------------
 // Packet format:
-//   [0xAA] [TYPE] [LEN] [PAYLOAD × LEN] [CHECKSUM]
-//   CHECKSUM = TYPE ^ LEN ^ PAYLOAD[0] ^ ... ^ PAYLOAD[LEN-1]
+//   [0xAA] [TYPE] [LEN] [PAYLOAD × LEN] [CRC-8-CCITT]
+//   CRC-8-CCITT over TYPE + LEN + PAYLOAD (polynomial 0x07)
 // ---------------------------------------------------------------------------
 
 #define PKT_START      0xAAu
@@ -17,6 +17,9 @@
 #define PKT_LEN_MOUSE      5u
 #define PKT_LEN_HEARTBEAT  0u
 #define PKT_MAX_PAYLOAD   16u  // Reject packets with LEN > this
+
+// CRC-8-CCITT (polynomial 0x07)
+uint8_t crc8_calc(const uint8_t *data, uint8_t len);
 
 // Parser state machine states
 typedef enum {
@@ -41,7 +44,7 @@ typedef struct {
     uint8_t     len;
     uint8_t     payload[PKT_MAX_PAYLOAD];
     uint8_t     offset;
-    uint8_t     checksum;   // Running XOR accumulator
+    uint8_t     checksum;   // Running CRC-8 accumulator
     uint32_t    last_ms;    // Timestamp of last received byte (millis)
 } PacketParser;
 
