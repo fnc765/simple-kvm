@@ -28,15 +28,15 @@ BluePill × 2 + Python GUI による DIY KVM スイッチです。
 ```
 simple-kvm/
 ├── firmware/
-│   ├── bluepill1/          # USB CDC → UART ブリッジ
-│   │   ├── bluepill1.ino
+│   ├── common/              # 共通パケットパーサ（CRC-8 検証含む）
 │   │   ├── packet_parser.h
 │   │   └── packet_parser.cpp
-│   └── bluepill2/          # UART → USB HID Composite
-│       ├── bluepill2.ino
-│       ├── packet_parser.h
-│       ├── packet_parser.cpp
-│       └── hid_handler.h
+│   ├── bluepill1/           # USB CDC → UART ブリッジ
+│   │   └── main.cpp
+│   └── bluepill2/           # UART → USB HID Composite
+│       ├── main.cpp
+│       ├── hid_handler.h
+│       └── hid_handler.cpp
 ├── app/
 │   ├── main.py             # エントリポイント
 │   ├── requirements.txt
@@ -64,10 +64,11 @@ simple-kvm/
 
 詳細は [docs/setup.md](docs/setup.md) を参照してください。
 
-1. Arduino IDE に STM32duino ボードサポートを追加
-2. **BP1**: `USB support = CDC (Serial)` で `firmware/bluepill1/bluepill1.ino` を書き込み
-3. **BP2**: `USB support = No USB` + `USBComposite_stm32f1` ライブラリをインストールして `firmware/bluepill2/bluepill2.ino` を書き込み
-4. PA9(TX)↔PA10(RX) をクロス接続し GND を共通化
+1. [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/index.html) をインストール
+2. ST-Link デバッガを接続し、BluePill を ST-Link で接続
+3. **BP1**: `pio run -e bluepill1 --target upload` で書き込み（USB CDC 有効、4 秒ウォッチドッグ付き）
+4. **BP2**: `pio run -e bluepill2 --target upload` で書き込み（STM32duino 内蔵 HID Composite、4 秒ウォッチドッグ付き）
+5. PA9(TX)↔PA10(RX) をクロス接続し GND を共通化
 
 ### Python アプリ
 
@@ -98,8 +99,8 @@ python main.py
 ## パケットプロトコル
 
 ```
-[0xAA] [TYPE] [LEN] [PAYLOAD × LEN] [CHECKSUM]
-CHECKSUM = TYPE ^ LEN ^ PAYLOAD[0] ^ ... ^ PAYLOAD[LEN-1]
+[0xAA] [TYPE] [LEN] [PAYLOAD × LEN] [CRC-8-CCITT]
+CRC-8-CCITT = table-lookup over TYPE + LEN + PAYLOAD (polynomial 0x07, init 0x00)
 
 TYPE 0x01: Keyboard (LEN=8) – HID Boot Keyboard Report
 TYPE 0x02: Mouse    (LEN=5) – [buttons, dx, dy, wheel_v, wheel_h]
@@ -122,4 +123,8 @@ MIT License
   STLink での書き込みを推奨します。
 - BluePill #2 では USB CDC と USB HID を同時使用できません。
   デバッグ出力が必要な場合は Serial1（UART1）を使用してください。
+- BluePill #2 は STM32duino フレームワーク内蔵の HID Composite で動作します。
+  外部ライブラリ `USBComposite_stm32f1` は不要です。
+- マウス水平スクロール（wheel_h）は STM32duino 内蔵 HID Composite が非サポート
+  のため、BP2 でデータは破棄されます。
 - 本プロジェクトは個人の学習・実験目的です。

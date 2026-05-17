@@ -44,3 +44,7 @@ typedef struct __attribute__((packed)) {
 #define MOUSE_BTN_LEFT   0x01u
 #define MOUSE_BTN_RIGHT  0x02u
 #define MOUSE_BTN_MIDDLE 0x04u
+
+// HID report validation
+bool validate_keyboard_report(const uint8_t *payload, uint8_t len);
+bool validate_mouse_report(const uint8_t *payload, uint8_t len);

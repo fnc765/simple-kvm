@@ -11,7 +11,7 @@
 
 #include <Arduino.h>
 #include <IWatchdog.h>
-#include "packet_parser.h"
+#include "../common/packet_parser.h"
 
 // ----- Pin / peripheral definitions ----------------------------------------
 #define LED_PIN      PC13         // Active-Low
@@ -33,26 +33,21 @@ static uint8_t  g_err_count = 0;
 
 /**
  * Rebuild and forward a validated packet to UART1.
- * Checksums the packet on the fly to ensure integrity across the UART link.
+ * Appends CRC-8-CCITT over type + len + payload to ensure integrity.
  */
 static void forward_packet(const Packet *p)
 {
-    // Pre-allocate worst-case buffer: START(1) + TYPE(1) + LEN(1) + PAYLOAD(16) + CS(1)
     uint8_t buf[1 + 1 + 1 + PKT_MAX_PAYLOAD + 1];
     uint8_t idx = 0;
-
     buf[idx++] = PKT_START;
     buf[idx++] = p->type;
     buf[idx++] = p->len;
-
-    uint8_t cs = p->type ^ p->len;
     for (uint8_t i = 0; i < p->len; i++) {
         buf[idx++] = p->payload[i];
-        cs        ^= p->payload[i];
     }
-    buf[idx++] = cs;
-
-    Serial1.write(buf, idx);
+    // CRC-8 over type + len + payload
+    buf[idx] = crc8_calc(&buf[1], 1 + 1 + p->len);
+    Serial1.write(buf, idx + 1);
 }
 
 // ----- Setup / Loop ----------------------------------------------------------
@@ -104,9 +99,9 @@ void loop()
         uint8_t b = (uint8_t)Serial.read();
         if (parser_feed(&g_parser, b, &g_pkt)) {
             forward_packet(&g_pkt);
-        } else {
-            g_err_count = 6; // 3回点滅
         }
+        // parser_feed() returning false is normal for intermediate bytes;
+        // only completed+validated packets return true. No error here.
     }
 
     // ---- (Optional) UART1 → USB CDC passthrough for ACK / debug ----------
