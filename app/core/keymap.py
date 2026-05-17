@@ -463,15 +463,20 @@ def scancode_to_hid(scancode: int, is_e0: bool, vk: int = 0) -> int:
     return _SCANCODE_TO_HID.get(key, 0)
 
 
-def vk_to_modifier(vk: int) -> int:
-    """
-    Return the HID modifier bit for a Windows virtual-key code.
+def vk_to_modifier(vk: int, scancode: int = 0, is_e0: bool = False) -> int:
+    """Convert a Windows virtual-key code to a USB HID modifier bitmask.
 
-    Args:
-        vk: The VKey field from RAWKEYBOARD (e.g. 0xA2 = VK_LCONTROL).
-
-    Returns:
-        A single-bit HID modifier mask (0x01–0x80), or 0 if *vk* is not
-        a recognised modifier key.
+    Raw Input may report generic VK codes (VK_SHIFT=0x10) instead of specific
+    left/right variants (VK_LSHIFT=0xA0).  When that happens we rely on the
+    scan code and E0 flag for left/right disambiguation.
     """
+    # Generic modifier VK codes – disambiguate via scan code + E0 flag
+    if vk == 0x10:      # VK_SHIFT
+        return 0x02 if scancode == 0x2A else 0x20  # left 0x2A / right 0x36
+    if vk == 0x11:      # VK_CONTROL
+        return 0x01 if not is_e0 else 0x10          # left no-E0  / right E0
+    if vk == 0x12:      # VK_MENU
+        return 0x04 if not is_e0 else 0x40          # left no-E0  / right E0
+
+    # Explicit left/right VK codes (keyboard-dependent)
     return _VK_TO_MODIFIER.get(vk, 0)
