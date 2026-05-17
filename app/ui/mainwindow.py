@@ -466,6 +466,13 @@ class MainWindow(QMainWindow):
     def _on_raw_key_down(self, scancode: int, vk: int, _flags: int,
                          is_e0: bool) -> None:
         """Raw Input keyboard press callback."""
+        # Debug: log all raw key events
+        mod_bit = vk_to_modifier(vk, scancode, is_e0)
+        hid = scancode_to_hid(scancode, is_e0, vk) if not mod_bit else 0
+        is_mod = "MOD" if mod_bit else "KEY"
+        print(f"[RAW] DOWN | sc=0x{scancode:02X} vk=0x{vk:02X} e0={int(is_e0)} | "
+              f"{is_mod} mod=0x{mod_bit:02X} hid=0x{hid:02X}", flush=True)
+
         if not self._kvm_active:
             return
 
@@ -476,11 +483,10 @@ class MainWindow(QMainWindow):
 
         # Modifier keys: use VK → modifier bit (full L/R discrimination)
         changed = False
-        mod_bit = vk_to_modifier(vk)
+        mod_bit = vk_to_modifier(vk, scancode, is_e0)
         if mod_bit:
             changed = self._input_state.press_modifier(mod_bit)
         else:
-            # Regular keys: scan code → HID usage ID
             hid = scancode_to_hid(scancode, is_e0, vk)
             if hid:
                 changed = self._input_state.press_key(hid)
@@ -492,10 +498,17 @@ class MainWindow(QMainWindow):
     def _on_raw_key_up(self, scancode: int, vk: int, _flags: int,
                        is_e0: bool) -> None:
         """Raw Input keyboard release callback."""
+        # Debug: log all raw key events
+        mod_bit = vk_to_modifier(vk, scancode, is_e0)
+        hid = scancode_to_hid(scancode, is_e0, vk) if not mod_bit else 0
+        is_mod = "MOD" if mod_bit else "KEY"
+        print(f"[RAW] UP   | sc=0x{scancode:02X} vk=0x{vk:02X} e0={int(is_e0)} | "
+              f"{is_mod} mod=0x{mod_bit:02X} hid=0x{hid:02X}", flush=True)
+
         if not self._kvm_active:
             return
         changed = False
-        mod_bit = vk_to_modifier(vk)
+        mod_bit = vk_to_modifier(vk, scancode, is_e0)
         if mod_bit:
             changed = self._input_state.release_modifier(mod_bit)
         else:
