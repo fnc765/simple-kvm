@@ -26,6 +26,9 @@ When the user clicks inside the VideoWidget:
 
 from __future__ import annotations
 
+import ctypes
+from ctypes import wintypes
+
 from PySide6.QtCore import QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import (
     QCursor,
@@ -46,8 +49,14 @@ from PySide6.QtWidgets import (
 )
 
 from core.capture import CaptureThread, DEFAULT_DEVICE, DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_FPS
-from core.input_hook import InputState
-from core.keymap import get_modifier_bit, is_modifier_key, qt_key_to_hid
+from core.input_hook import InputState, RawInputHook
+from core.keymap import (
+    get_modifier_bit,
+    is_modifier_key,
+    qt_key_to_hid,
+    scancode_to_hid,
+    vk_to_modifier,
+)
 from core.protocol import build_heartbeat, build_keyboard_report, build_mouse_report
 from core.serial_comm import SerialComm
 from ui.settings_dialog import SettingsDialog
@@ -86,6 +95,18 @@ class VideoWidget(QLabel):
         self._update_scaled_pixmap()
 
 
+class _MSG(ctypes.Structure):
+    """Windows MSG structure for nativeEvent parsing."""
+    _fields_ = [
+        ("hwnd",    wintypes.HWND),
+        ("message", wintypes.UINT),
+        ("wParam",  wintypes.WPARAM),
+        ("lParam",  wintypes.LPARAM),
+        ("time",    wintypes.DWORD),
+        ("pt",      wintypes.POINT),
+    ]
+
+
 class MainWindow(QMainWindow):
     """Top-level KVM window."""
 
@@ -119,6 +140,10 @@ class MainWindow(QMainWindow):
         self._input_state   = InputState()
         self._warp_pending  = False          # True while cursor warp is in-flight
 
+        # ---- Raw Input (Windows) --------------------------------------------
+        self._raw_hook: RawInputHook | None = None
+        self._use_raw_input: bool = False     # True when Raw Input is active
+
         # ---- Serial communication -------------------------------------------
         self._serial = SerialComm(self)
         self._serial.connected.connect(self._on_serial_connected)
@@ -146,6 +171,15 @@ class MainWindow(QMainWindow):
 
         # Focus-loss guard: deactivate KVM when any other window gains focus
         QApplication.instance().focusChanged.connect(self._on_focus_changed)
+
+    # -------------------------------------------------------------------------
+    # Show event – initialise Raw Input once the native window exists
+    # -------------------------------------------------------------------------
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if not self._raw_hook:
+            self._setup_raw_input()
 
     # -------------------------------------------------------------------------
     # Settings
@@ -330,6 +364,11 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------------
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        # When Raw Input is active, skip Qt keyboard events entirely
+        # to avoid double-sending every keystroke.
+        if self._use_raw_input and self._kvm_active:
+            return
+
         key = event.key()
 
         # Esc always exits focus mode
@@ -355,6 +394,10 @@ class MainWindow(QMainWindow):
         self._serial.enqueue(build_keyboard_report(modifier, keys))
 
     def keyReleaseEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        # When Raw Input is active, skip Qt keyboard events.
+        if self._use_raw_input and self._kvm_active:
+            return
+
         if not self._kvm_active:
             super().keyReleaseEvent(event)
             return
@@ -369,6 +412,81 @@ class MainWindow(QMainWindow):
                 self._input_state.release_modifier(bit)
         else:
             hid = qt_key_to_hid(key)
+            if hid:
+                self._input_state.release_key(hid)
+
+        modifier, keys = self._input_state.get_keyboard_report()
+        self._serial.enqueue(build_keyboard_report(modifier, keys))
+
+    # -------------------------------------------------------------------------
+    # Raw Input (Windows) – native event interception
+    # -------------------------------------------------------------------------
+
+    def nativeEvent(self, eventType: bytes, message: int) -> tuple[bool, int]:
+        """Intercept WM_INPUT messages for scancode-level keyboard input."""
+        if not self._use_raw_input or not self._kvm_active:
+            return super().nativeEvent(eventType, message)
+
+        try:
+            ptr = int(message)
+        except (TypeError, ValueError):
+            return super().nativeEvent(eventType, message)
+
+        msg_struct = ctypes.cast(ptr, ctypes.POINTER(_MSG)).contents
+        msg    = msg_struct.message
+        lparam = msg_struct.lParam
+
+        if self._raw_hook.handle_message(msg, lparam):
+            return True, 0
+
+        return super().nativeEvent(eventType, message)
+
+    # -------------------------------------------------------------------------
+    # Raw Input – setup and callbacks
+    # -------------------------------------------------------------------------
+
+    def _setup_raw_input(self) -> None:
+        """Create and register the RawInputHook for this window."""
+        try:
+            self._raw_hook = RawInputHook(
+                on_key_down=self._on_raw_key_down,
+                on_key_up=self._on_raw_key_up,
+            )
+            hwnd = int(self.winId())
+            if self._raw_hook.register(hwnd):
+                self._use_raw_input = True
+        except Exception:
+            self._use_raw_input = False
+
+    def _on_raw_key_down(self, scancode: int, vk: int, _flags: int,
+                         is_e0: bool) -> None:
+        """Raw Input keyboard press callback."""
+        # Escape always exits KVM focus mode
+        if scancode == 0x01:  # Esc
+            self._set_kvm_active(False)
+            return
+
+        # Modifier keys: use VK → modifier bit (full L/R discrimination)
+        mod_bit = vk_to_modifier(vk)
+        if mod_bit:
+            self._input_state.press_modifier(mod_bit)
+        else:
+            # Regular keys: scan code → HID usage ID
+            hid = scancode_to_hid(scancode, is_e0)
+            if hid:
+                self._input_state.press_key(hid)
+
+        modifier, keys = self._input_state.get_keyboard_report()
+        self._serial.enqueue(build_keyboard_report(modifier, keys))
+
+    def _on_raw_key_up(self, scancode: int, vk: int, _flags: int,
+                       is_e0: bool) -> None:
+        """Raw Input keyboard release callback."""
+        mod_bit = vk_to_modifier(vk)
+        if mod_bit:
+            self._input_state.release_modifier(mod_bit)
+        else:
+            hid = scancode_to_hid(scancode, is_e0)
             if hid:
                 self._input_state.release_key(hid)
 
