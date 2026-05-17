@@ -17,7 +17,6 @@ static PacketParser g_parser;
 static Packet       g_pkt;
 #define LED_PIN PC13
 
-static uint8_t  g_buttons   = 0;
 static uint8_t  g_err_count = 0;
 static bool     g_led_state = false;
 static uint32_t g_err_last  = 0;
@@ -37,12 +36,12 @@ static void hid_send_mouse(const Packet *p)
     if (!validate_mouse_report(p->payload, p->len)) { g_err_count = 6; return; }
     KVMMouseReport rpt;
     memcpy(&rpt, p->payload, sizeof(rpt));
-    g_buttons = rpt.buttons;
-    uint8_t report[4];
-    report[0] = g_buttons;
+    uint8_t report[5];
+    report[0] = rpt.buttons;
     report[1] = static_cast<uint8_t>(rpt.dx);
     report[2] = static_cast<uint8_t>(rpt.dy);
     report[3] = static_cast<uint8_t>(rpt.wheel_v);
+    report[4] = static_cast<uint8_t>(rpt.wheel_h);
     HID_Composite_mouse_sendReport(report, sizeof(report));
 }
 

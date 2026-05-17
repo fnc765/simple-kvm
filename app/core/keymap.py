@@ -77,6 +77,8 @@ _KEY_MAP: dict[int, int] = {
     Qt.Key.Key_Backslash:    0x31,  # \  |
     Qt.Key.Key_Semicolon:    0x33,  # ;  :
     Qt.Key.Key_Apostrophe:   0x34,  # '  "
+    # NOTE: 0x35 is shared between JP Zenkaku/Hankaku and US Grave Accent.
+    # The target PC interprets based on its own keyboard layout.
     Qt.Key.Key_QuoteLeft:    0x35,  # `  ~  (grave accent)
 
     # Japanese keyboard – 半角/全角 (Zenkaku/Hankaku)
@@ -285,6 +287,8 @@ _SCANCODE_TO_HID: dict[int | tuple[int, int], int] = {
     (0xE0, 0x5D):      0x65,  # Application (Menu)
 
     # ---- Punctuation / Symbols (US layout) ----
+    # NOTE: 0x35 is shared between JP Zenkaku/Hankaku and US Grave Accent.
+    # The target PC interprets based on its own keyboard layout.
     0x29: 0x35,  # ` ~  (Zenkaku/Hankaku 半角/全角 on JP keyboards)
     0x0C: 0x2D,  # - _
     0x0D: 0x2E,  # = +
@@ -312,7 +316,7 @@ _SCANCODE_TO_HID: dict[int | tuple[int, int], int] = {
     0x76: 0x73,  # F24
 
     # ---- Japanese keyboard specific (where different from US) ----
-    # Muhenkan (無変換), Henkan (変換), Hiragana/Katakana, Yen (¥)
+    # Japanese 109-key keyboard: Muhenkan, Henkan, Hiragana/Katakana, Yen.
     # Note: scan codes vary by keyboard vendor; these are common 106/109-key values.
     0x7B: 0x8B,  # 無変換 (Muhenkan)
     0x79: 0x8A,  # 変換   (Henkan)

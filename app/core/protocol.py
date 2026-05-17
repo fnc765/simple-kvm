@@ -59,8 +59,8 @@ def _crc8(data: bytes) -> int:
 def _build_packet(pkt_type: int, payload: bytes) -> bytes:
     """Assemble a framed packet with CRC-8-CCITT checksum."""
     length = len(payload)
-    if length > 255:
-        raise ValueError(f"Payload too large: {length} bytes (max 255)")
+    if length > 16:
+        raise ValueError(f"Payload too large: {length} bytes (max 16)")
     checksum = _crc8(bytes([pkt_type, length]) + payload)
     return bytes([PKT_START, pkt_type, length]) + payload + bytes([checksum])
 

@@ -65,6 +65,9 @@ bool parser_feed(PacketParser *p, uint8_t b, Packet *out)
 
     // Re-sync only in PS_TYPE and PS_LEN states to avoid false resets
     // from payload bytes that happen to equal PKT_START (0xAA).
+    // Note: PS_PAYLOAD does NOT re-sync on 0xAA bytes because a payload
+    // byte may legitimately equal PKT_START. Checksum mismatch or the
+    // PARSER_TIMEOUT_MS (50 ms) gap detection handles recovery instead.
     if (b == PKT_START &&
         (p->state == PS_TYPE || p->state == PS_LEN)) {
         p->state    = PS_TYPE;
