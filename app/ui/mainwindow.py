@@ -30,7 +30,7 @@ import ctypes
 import time
 from ctypes import wintypes
 
-from PySide6.QtCore import QPoint, QSize, Qt, QTimer
+from PySide6.QtCore import QPoint, QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import (
     QCursor,
     QImage,
@@ -49,7 +49,16 @@ from PySide6.QtWidgets import (
     QStatusBar,
 )
 
-from core.capture import CaptureThread, DEFAULT_DEVICE, DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_FPS
+from core.capture import (
+    CaptureThread,
+    DEFAULT_DEVICE,
+    DEFAULT_FPS,
+    DEFAULT_HEIGHT,
+    DEFAULT_WIDTH,
+    ORGANIZATION,
+    APP_NAME,
+    list_dshow_devices,
+)
 from core.input_hook import InputState, RawInputHook
 from core.keymap import (
     get_modifier_bit,
@@ -123,6 +132,10 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("simple-kvm")
+
+        # ---- Persistent settings ----------------------------------------------
+        QSettings.setDefaultFormat(QSettings.Format.NativeFormat)
+        self._settings = QSettings(ORGANIZATION, APP_NAME)
 
         # ---- Video widget ---------------------------------------------------
         self._video_widget = VideoWidget(self)
@@ -216,6 +229,7 @@ class MainWindow(QMainWindow):
         self._capture_device = DEFAULT_DEVICE
         self._connected      = False
         self._mouse_speed    = 1.0       # Mouse cursor speed multiplier (0.5x .. 2.0x)
+        self._aspect_setting = "keep"    # aspect ratio mode for QSettings ("keep"/"fill")
 
         # ---- Heartbeat timer ------------------------------------------------
         self._hb_timer = QTimer(self)
@@ -230,6 +244,10 @@ class MainWindow(QMainWindow):
 
         # Focus-loss guard: deactivate KVM when any other window gains focus
         QApplication.instance().focusChanged.connect(self._on_focus_changed)
+
+        # ---- Load saved settings and try auto-connect -----------------------
+        self._load_settings()
+        self._try_auto_connect()
 
     # -------------------------------------------------------------------------
     # Show event – initialise Raw Input once the native window exists
@@ -269,8 +287,10 @@ class MainWindow(QMainWindow):
             if new_mode != self._video_widget._aspect_mode:
                 self._video_widget.set_aspect_mode(new_mode)
             self._mouse_speed = mouse_speed
+            self._aspect_setting = aspect_mode
             if changed:
                 self._apply_settings()
+            self._save_settings()
 
     def _apply_settings(self) -> None:
         self._set_kvm_active(False)
@@ -789,6 +809,7 @@ class MainWindow(QMainWindow):
             self._set_kvm_active(False)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self._save_settings()
         self._kvm_click_timer.stop()
         if self._is_fullscreen:
             self._exit_fullscreen()
@@ -796,3 +817,79 @@ class MainWindow(QMainWindow):
         self._capture.stop()
         self._serial.stop()
         super().closeEvent(event)
+
+    # =========================================================================
+    # Persistent settings (QSettings)
+    # =========================================================================
+    #
+    # Settings are stored via QSettings. On Windows this maps to the registry
+    # under HKCU\Software\simple-kvm\app.  Keys:
+    #
+    #   serial/port        : str   – last-used COM port (e.g. "COM3")
+    #   capture/device     : str   – last-used DirectShow device friendly name
+    #   video/aspect       : str   – "keep" or "fill"
+    #   input/mouse_speed  : str   – speed multiplier as string (e.g. "1.0")
+
+    def _save_settings(self) -> None:
+        """Write current settings to persistent storage."""
+        self._settings.setValue("serial/port", self._port)
+        self._settings.setValue("capture/device", self._capture_device)
+        self._settings.setValue("video/aspect", self._aspect_setting)
+        self._settings.setValue(
+            "input/mouse_speed", f"{self._mouse_speed:.1f}"
+        )
+        self._settings.sync()
+
+    def _load_settings(self) -> None:
+        """Restore settings from persistent storage.
+
+        Values are loaded with sensible defaults. If a key does not exist
+        (first launch), the defaults from ``__init__`` are preserved.
+        """
+        self._port = self._settings.value("serial/port", "")
+        self._capture_device = self._settings.value(
+            "capture/device", DEFAULT_DEVICE
+        )
+        self._aspect_setting = self._settings.value("video/aspect", "keep")
+
+        speed_str = self._settings.value("input/mouse_speed", "1.0")
+        try:
+            self._mouse_speed = float(speed_str)
+        except (ValueError, TypeError):
+            self._mouse_speed = 1.0
+
+        # Apply loaded aspect ratio to the video widget
+        mode = (
+            Qt.AspectRatioMode.KeepAspectRatio
+            if self._aspect_setting == "keep"
+            else Qt.AspectRatioMode.IgnoreAspectRatio
+        )
+        self._video_widget.set_aspect_mode(mode)
+
+    def _try_auto_connect(self) -> None:
+        """Attempt automatic connection with saved settings.
+
+        Checks that the saved COM port and capture device are currently
+        available on the system.  If either is missing, silently falls
+        back to manual configuration (no error popup).
+        """
+        # --- Validate COM port ---
+        port_ok = False
+        if self._port:
+            import serial.tools.list_ports
+            available = [
+                p.device for p in serial.tools.list_ports.comports()
+            ]
+            port_ok = self._port in available
+
+        # --- Validate capture device ---
+        device_ok = False
+        if self._capture_device:
+            device_ok = self._capture_device in list_dshow_devices()
+
+        # --- Connect only if both are valid ---
+        if port_ok and device_ok:
+            self._status.showMessage(
+                f"Auto-connecting to {self._port}..."
+            )
+            self._apply_settings()
