@@ -215,6 +215,7 @@ class MainWindow(QMainWindow):
         self._port           = ""
         self._capture_device = DEFAULT_DEVICE
         self._connected      = False
+        self._mouse_speed    = 1.0       # Mouse cursor speed multiplier (0.5x .. 2.0x)
 
         # ---- Heartbeat timer ------------------------------------------------
         self._hb_timer = QTimer(self)
@@ -247,9 +248,15 @@ class MainWindow(QMainWindow):
         current_aspect = "keep" if (
             self._video_widget._aspect_mode == Qt.AspectRatioMode.KeepAspectRatio
         ) else "fill"
-        dlg = SettingsDialog(self._port, self._capture_device, current_aspect, self)
+        dlg = SettingsDialog(
+            self._port,
+            self._capture_device,
+            current_aspect,
+            self._mouse_speed,
+            self,
+        )
         if dlg.exec():
-            port, device_name, aspect_mode = dlg.get_values()
+            port, device_name, aspect_mode, mouse_speed = dlg.get_values()
             changed = False
             if port != self._port or device_name != self._capture_device:
                 self._port           = port
@@ -261,6 +268,7 @@ class MainWindow(QMainWindow):
             )
             if new_mode != self._video_widget._aspect_mode:
                 self._video_widget.set_aspect_mode(new_mode)
+            self._mouse_speed = mouse_speed
             if changed:
                 self._apply_settings()
 
@@ -560,6 +568,11 @@ class MainWindow(QMainWindow):
         global_pos = event.globalPosition().toPoint()
         dx = global_pos.x() - self._center.x()
         dy = global_pos.y() - self._center.y()
+
+        # Apply mouse speed multiplier
+        if self._mouse_speed != 1.0:
+            dx = int(round(dx * self._mouse_speed))
+            dy = int(round(dy * self._mouse_speed))
 
         if dx != 0 or dy != 0:
             self._serial.enqueue(
