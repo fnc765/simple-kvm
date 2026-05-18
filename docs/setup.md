@@ -114,7 +114,14 @@ python main.py
    - デバイスマネージャで「ポート (COM と LPT)」→「STMicroelectronics Virtual COM Port」を確認
 3. **Capture Device**: HDMI キャプチャドングルのデバイス番号を選択
    - PC に他のカメラがある場合は Device 1 以降になることがあります
-4. OK をクリック → 映像が表示されます
+4. **Aspect Ratio**: 映像のアスペクト比モードを選択
+   - **Maintain Aspect Ratio**: アスペクト比を維持（黒帯あり）
+   - **Stretch to Fill**: 画面全体に引き伸ばし
+5. **Mouse Speed**: マウスカーソル速度を 0.5x 〜 2.0x の範囲で調整（0.1 刻み）
+6. OK をクリック → 映像が表示されます
+
+> **設定は自動的に保存**され、次回起動時に復元されます。
+> COM ポートとキャプチャデバイスが前回と同じ状態で接続されていれば、起動時に自動接続されます。
 
 ---
 
@@ -147,7 +154,15 @@ python main.py
 **アスペクト比の設定**:
 - File → Settings の「Aspect Ratio」で以下を選択できます
   - **Maintain Aspect Ratio**: アスペクト比を維持（黒帯が表示される場合があります）
-  - **Stretch to Fill**: 画面全体に引き伸ばして表示
+   - **Stretch to Fill**: 画面全体に引き伸ばして表示
+
+### マウスカーソル速度の調整
+
+ターゲット PC 上のマウスカーソル感度を調整できます。
+
+- File → Settings の「Mouse Speed」スライダーで調整
+- スライダーを右に動かすほどカーソルが速く動きます
+- 設定値は即座に反映され、次回起動時も維持されます
 
 ### LED インジケータ
 
