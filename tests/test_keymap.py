@@ -1,7 +1,7 @@
 """Unit tests for keymap.py - scan code and VK mappings."""
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
-from core.keymap import scancode_to_hid, vk_to_modifier, qt_key_to_hid
+from core.keymap import scancode_to_hid, vk_to_modifier, qt_key_to_hid, is_auto_release
 
 
 def test_numpad():
@@ -43,10 +43,19 @@ def test_common_keys():
     assert scancode_to_hid(0x39, False) == 0x2C, "Space"
 
 
+def test_auto_release():
+    """Verify auto-release detection for toggle/lock keys."""
+    assert is_auto_release(0x3A) == True,   "Caps Lock should auto-release"
+    assert is_auto_release(0x29) == True,   "半角/全角 should auto-release"
+    assert is_auto_release(0x01) == False,  "Esc (not toggle) should NOT auto-release"
+    assert is_auto_release(0x1E) == False,  "'a' (not toggle) should NOT auto-release"
+
+
 def test_all():
     test_numpad()
     test_modifiers()
     test_common_keys()
+    test_auto_release()
     print("All tests passed!")
 
 

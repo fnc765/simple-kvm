@@ -430,6 +430,37 @@ def is_modifier_key(qt_key: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Toggle key auto-release (Windows Raw Input path)
+# ---------------------------------------------------------------------------
+# Toggle keys that the OS handles internally — their UP events are consumed
+# by the OS (keyboard LED state, IME toggle, etc.), so we must auto-release
+# them immediately after pressing to prevent stuck-key syndrome.
+_AUTO_RELEASE_SCANCODES: set[int] = {
+    0x3A,  # Caps Lock
+    0x45,  # Num Lock
+    0x46,  # Scroll Lock
+    0x29,  # 半角/全角 (Grave Accent physical position)
+    0x7B,  # 無変換 (Muhenkan)
+    0x79,  # 変換 (Henkan)
+    0x70,  # カタカナ/ひらがな (Hiragana/Katakana)
+    0x5C,  # ¥ (JP keyboard)
+    0x7D,  # ろ (Ro)
+}
+
+
+def is_auto_release(scancode: int) -> bool:
+    """Return True if *scancode* is a toggle/lock key that should be
+    auto-released immediately to prevent stuck-key syndrome.
+
+    The OS handles toggle keys (CapsLock, NumLock, ScrollLock,
+    Zenkaku/Hankaku, etc.) internally, consuming their UP events.
+    Without auto-release, the KVM app would hold these keys down
+    indefinitely, causing repeated toggling on the target PC.
+    """
+    return scancode in _AUTO_RELEASE_SCANCODES
+
+
+# ---------------------------------------------------------------------------
 # Raw Input helpers (scancode / VK → HID)
 # ---------------------------------------------------------------------------
 
