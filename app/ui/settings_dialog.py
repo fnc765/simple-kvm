@@ -14,8 +14,10 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QPushButton,
+    QSlider,
 )
 
 from core.capture import list_dshow_devices
@@ -34,6 +36,7 @@ class SettingsDialog(QDialog):
         current_port: str = "",
         current_device: str = "",
         current_aspect: str = "keep",
+        current_speed: float = 1.0,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -78,6 +81,25 @@ class SettingsDialog(QDialog):
             self._aspect_combo.setCurrentIndex(1)
         layout.addRow("Aspect Ratio:", self._aspect_combo)
 
+        # ---- Mouse speed slider (0.5x .. 2.0x, 0.1 step) ------------------
+        self._speed_slider = QSlider(Qt.Orientation.Horizontal)
+        self._speed_slider.setRange(0, 15)       # 0.5 + 0*0.1 .. 0.5 + 15*0.1 = 2.0
+        self._speed_slider.setSingleStep(1)
+        self._speed_slider.setPageStep(3)
+        self._speed_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self._speed_slider.setTickInterval(3)
+        # Set initial slider position from current_speed
+        initial_index = int(round((current_speed - 0.5) / 0.1))
+        self._speed_slider.setValue(max(0, min(15, initial_index)))
+
+        self._speed_label = QLabel(f"{current_speed:.1f}x")
+        speed_layout = QHBoxLayout()
+        speed_layout.addWidget(self._speed_slider)
+        speed_layout.addWidget(self._speed_label)
+        layout.addRow("Mouse Speed:", speed_layout)
+
+        self._speed_slider.valueChanged.connect(self._on_speed_changed)
+
         # ---- Buttons -------------------------------------------------------
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -116,13 +138,19 @@ class SettingsDialog(QDialog):
         finally:
             QApplication.restoreOverrideCursor()
 
+    def _on_speed_changed(self, value: int) -> None:
+        """Update speed label when slider value changes."""
+        speed = 0.5 + value * 0.1
+        self._speed_label.setText(f"{speed:.1f}x")
+
     # ------------------------------------------------------------------
     # Result accessors
     # ------------------------------------------------------------------
 
-    def get_values(self) -> tuple[str, str, str]:
-        """Return *(selected_port, selected_device_name, aspect_mode)*."""
+    def get_values(self) -> tuple[str, str, str, float]:
+        """Return *(selected_port, selected_device_name, aspect_mode, mouse_speed)*."""
         port = self._port_combo.currentText()
         device = self._device_combo.currentText()
         aspect = "keep" if self._aspect_combo.currentIndex() == 0 else "fill"
-        return port, device, aspect
+        speed = 0.5 + self._speed_slider.value() * 0.1
+        return port, device, aspect, speed
