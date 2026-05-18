@@ -27,6 +27,7 @@ When the user clicks inside the VideoWidget:
 from __future__ import annotations
 
 import ctypes
+import time
 from ctypes import wintypes
 
 from PySide6.QtCore import QPoint, QSize, Qt, QTimer
@@ -52,6 +53,7 @@ from core.capture import CaptureThread, DEFAULT_DEVICE, DEFAULT_WIDTH, DEFAULT_H
 from core.input_hook import InputState, RawInputHook
 from core.keymap import (
     get_modifier_bit,
+    is_auto_release,
     is_modifier_key,
     qt_key_to_hid,
     scancode_to_hid,
@@ -483,6 +485,15 @@ class MainWindow(QMainWindow):
             hid = scancode_to_hid(scancode, is_e0, vk)
             if hid:
                 changed = self._input_state.press_key(hid)
+                # Toggle/lock keys: send the press report then immediately
+                # release to prevent stuck-key syndrome.  The OS consumes the
+                # UP event for these keys (LED / IME handling), so we never
+                # receive an _on_raw_key_up callback.
+                if is_auto_release(scancode):
+                    modifier, keys = self._input_state.get_keyboard_report()
+                    self._serial.enqueue(build_keyboard_report(modifier, keys))
+                    time.sleep(0.01)
+                    self._input_state.release_key(hid)
 
         if changed:
             modifier, keys = self._input_state.get_keyboard_report()
