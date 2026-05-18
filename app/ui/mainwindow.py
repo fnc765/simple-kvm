@@ -191,6 +191,12 @@ class MainWindow(QMainWindow):
         self._is_fullscreen = False
         self._pre_fullscreen_geometry = None   # QRect or None
         self._pre_fullscreen_state = None      # Qt.WindowStates or None
+        self._esc_suppressed = False           # Suppress Qt keyPressEvent after Raw Input Esc
+
+        # Single-click KVM delay timer (to distinguish from double-click for fullscreen)
+        self._kvm_click_timer = QTimer(self)
+        self._kvm_click_timer.setSingleShot(True)
+        self._kvm_click_timer.timeout.connect(self._activate_kvm_from_click)
 
         # ---- Raw Input (Windows) --------------------------------------------
         self._raw_hook: RawInputHook | None = None
@@ -302,6 +308,11 @@ class MainWindow(QMainWindow):
             self._fps_overlay.raise_()
         else:
             self._status.showMessage(f"{port_part}  |  {fps_text}")
+
+    def _activate_kvm_from_click(self) -> None:
+        """Activate KVM mode after single-click confirmation (timer callback)."""
+        if not self._kvm_active:
+            self._set_kvm_active(True)
 
     def _send_heartbeat(self) -> None:
         if self._serial.isRunning():
@@ -478,7 +489,7 @@ class MainWindow(QMainWindow):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if not self._kvm_active:
-            # Enter KVM mode when clicking inside the VideoWidget area
+            # Delay KVM activation to distinguish single-click from double-click
             local = self._video_widget.mapFromGlobal(
                 event.globalPosition().toPoint()
             )
@@ -487,7 +498,7 @@ class MainWindow(QMainWindow):
                 and 0 <= local.y() < self._video_widget.height()
             )
             if in_widget:
-                self._set_kvm_active(True)
+                self._kvm_click_timer.start(400)
             return
 
         btn = event.button()
@@ -520,6 +531,7 @@ class MainWindow(QMainWindow):
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         """Double-click on video widget toggles fullscreen."""
+        self._kvm_click_timer.stop()  # Cancel pending KVM activation
         if not self._kvm_active:
             local = self._video_widget.mapFromGlobal(
                 event.globalPosition().toPoint()
@@ -581,6 +593,9 @@ class MainWindow(QMainWindow):
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         # --- Priority 1: Escape handling ---
         if event.key() == Qt.Key.Key_Escape:
+            if self._esc_suppressed:
+                self._esc_suppressed = False   # Reset flag for next Esc press
+                return
             if self._kvm_active:
                 self._set_kvm_active(False)
                 return
@@ -699,6 +714,7 @@ class MainWindow(QMainWindow):
                 # KVM+fullscreen: first Esc exits KVM, second exits fullscreen
                 if self._kvm_active:
                     self._set_kvm_active(False)
+                    self._esc_suppressed = True  # Suppress subsequent Qt keyPressEvent
                 else:
                     self.toggle_fullscreen()
             else:
@@ -760,6 +776,7 @@ class MainWindow(QMainWindow):
             self._set_kvm_active(False)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self._kvm_click_timer.stop()
         if self._is_fullscreen:
             self._exit_fullscreen()
         self._set_kvm_active(False)
