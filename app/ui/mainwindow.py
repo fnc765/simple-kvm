@@ -75,6 +75,12 @@ class VideoWidget(QLabel):
         self.setStyleSheet("background: #111;")
         self.setText("No Signal – click to start capture")
         self._pixmap: QPixmap | None = None  # オリジナルピクスマップを保持
+        self._aspect_mode = Qt.AspectRatioMode.KeepAspectRatio  # default
+
+    def set_aspect_mode(self, mode: Qt.AspectRatioMode) -> None:
+        """Set aspect ratio mode: KeepAspectRatio or IgnoreAspectRatio."""
+        self._aspect_mode = mode
+        self._update_scaled_pixmap()
 
     def _update_scaled_pixmap(self) -> None:
         if self._pixmap is None:
@@ -86,7 +92,7 @@ class VideoWidget(QLabel):
         )
         scaled = self._pixmap.scaled(
             target,
-            Qt.AspectRatioMode.KeepAspectRatio,
+            self._aspect_mode,
             Qt.TransformationMode.SmoothTransformation,
         )
         scaled.setDevicePixelRatio(dpr)
@@ -122,6 +128,40 @@ class MainWindow(QMainWindow):
         self._video_widget = VideoWidget(self)
         self.setCentralWidget(self._video_widget)
 
+        # ---- FPS overlay (visible only in fullscreen) -----------------------
+        self._fps_overlay = QLabel(self._video_widget)
+        self._fps_overlay.setStyleSheet(
+            "QLabel {"
+            "  background: rgba(0, 0, 0, 140);"
+            "  color: #0f0;"
+            "  font-family: Consolas, monospace;"
+            "  font-size: 12px;"
+            "  padding: 4px 8px;"
+            "  border-radius: 4px;"
+            "}"
+        )
+        self._fps_overlay.hide()
+
+        # ---- Fullscreen hint overlay ----------------------------------------
+        self._fullscreen_hint = QLabel(self._video_widget)
+        self._fullscreen_hint.setText("Press ESC to exit fullscreen")
+        self._fullscreen_hint.setStyleSheet(
+            "QLabel {"
+            "  background: rgba(0, 0, 0, 160);"
+            "  color: #ccc;"
+            "  font-size: 14px;"
+            "  padding: 8px 16px;"
+            "  border-radius: 6px;"
+            "}"
+        )
+        self._fullscreen_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._fullscreen_hint.adjustSize()
+        self._fullscreen_hint.hide()
+
+        self._fullscreen_hint_timer = QTimer(self)
+        self._fullscreen_hint_timer.setSingleShot(True)
+        self._fullscreen_hint_timer.timeout.connect(self._fullscreen_hint.hide)
+
         # ---- Status bar -----------------------------------------------------
         self._status = QStatusBar()
         self.setStatusBar(self._status)
@@ -136,11 +176,21 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction("Quit", QApplication.quit)
 
+        view_menu = QMenu("View", self)
+        menu_bar.addMenu(view_menu)
+        fullscreen_action = view_menu.addAction("Toggle Fullscreen\tF11")
+        fullscreen_action.triggered.connect(self.toggle_fullscreen)
+
         # ---- Input / KVM state ----------------------------------------------
         self._kvm_active    = False
         self._center        = QPoint()       # VideoWidget centre in global coords
         self._input_state   = InputState()
         self._warp_pending  = False          # True while cursor warp is in-flight
+
+        # ---- Fullscreen state ------------------------------------------------
+        self._is_fullscreen = False
+        self._pre_fullscreen_geometry = None   # QRect or None
+        self._pre_fullscreen_state = None      # Qt.WindowStates or None
 
         # ---- Raw Input (Windows) --------------------------------------------
         self._raw_hook: RawInputHook | None = None
@@ -188,12 +238,24 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------------
 
     def _open_settings(self) -> None:
-        dlg = SettingsDialog(self._port, self._capture_device, self)
+        current_aspect = "keep" if (
+            self._video_widget._aspect_mode == Qt.AspectRatioMode.KeepAspectRatio
+        ) else "fill"
+        dlg = SettingsDialog(self._port, self._capture_device, current_aspect, self)
         if dlg.exec():
-            port, device_name = dlg.get_values()
+            port, device_name, aspect_mode = dlg.get_values()
+            changed = False
             if port != self._port or device_name != self._capture_device:
                 self._port           = port
                 self._capture_device = device_name
+                changed = True
+            new_mode = (
+                Qt.AspectRatioMode.KeepAspectRatio if aspect_mode == "keep"
+                else Qt.AspectRatioMode.IgnoreAspectRatio
+            )
+            if new_mode != self._video_widget._aspect_mode:
+                self._video_widget.set_aspect_mode(new_mode)
+            if changed:
                 self._apply_settings()
 
     def _apply_settings(self) -> None:
@@ -229,7 +291,17 @@ class MainWindow(QMainWindow):
 
     def _on_fps_update(self, fps: float) -> None:
         port_part = f"Connected: {self._port}" if self._connected else "Disconnected"
-        self._status.showMessage(f"{port_part}  |  FPS: {fps:.1f}")
+        fps_text = f"FPS: {fps:.1f}"
+
+        if self._is_fullscreen:
+            self._fps_overlay.setText(f"  {port_part}  |  {fps_text}  ")
+            self._fps_overlay.adjustSize()
+            if not self._fps_overlay.isVisible():
+                self._fps_overlay.move(8, 8)
+                self._fps_overlay.show()
+            self._fps_overlay.raise_()
+        else:
+            self._status.showMessage(f"{port_part}  |  {fps_text}")
 
     def _send_heartbeat(self) -> None:
         if self._serial.isRunning():
@@ -245,21 +317,19 @@ class MainWindow(QMainWindow):
         self._kvm_active = active
 
         if active:
-            self.menuBar().setEnabled(False)
+            # Guard: do not touch menu bar when fullscreen (it's already hidden)
+            if not self._is_fullscreen:
+                self.menuBar().setEnabled(False)
             self.setCursor(Qt.CursorShape.BlankCursor)
-            # Compute the VideoWidget centre in global screen coordinates
-            self._center = self._video_widget.mapToGlobal(
-                QPoint(
-                    self._video_widget.width()  // 2,
-                    self._video_widget.height() // 2,
-                )
-            )
+            self._recompute_center()
             QCursor.setPos(self._center)
             self._status.showMessage(
                 f"{self._port} – KVM active (Esc to release)"
             )
         else:
-            self.menuBar().setEnabled(True)
+            # Guard: do not touch menu bar when fullscreen (managed by fullscreen exit)
+            if not self._is_fullscreen:
+                self.menuBar().setEnabled(True)
             self.unsetCursor()
             # Release all held keys/buttons
             self._input_state.clear_keys()
@@ -268,6 +338,139 @@ class MainWindow(QMainWindow):
             self._serial.enqueue(build_mouse_report(0, 0, 0))
             if self._connected:
                 self._status.showMessage(f"Connected: {self._port}")
+
+    # -------------------------------------------------------------------------
+    # Fullscreen
+    # -------------------------------------------------------------------------
+
+    def toggle_fullscreen(self) -> None:
+        """Toggle fullscreen mode on/off."""
+        if self._is_fullscreen:
+            self._exit_fullscreen()
+        else:
+            self._enter_fullscreen()
+
+    def _enter_fullscreen(self) -> None:
+        """Enter fullscreen mode."""
+        self._is_fullscreen = True
+
+        # Save current geometry and window state before going fullscreen
+        self._pre_fullscreen_geometry = self.geometry()
+        self._pre_fullscreen_state = self.windowState()
+
+        # Save KVM state (showFullScreen may trigger focus events)
+        was_kvm_active = self._kvm_active
+
+        # Snapshot input state to survive focus-loss-induced clear
+        with self._input_state._lock:
+            _saved_modifier = self._input_state.modifier
+            _saved_keys = list(self._input_state.pressed_keys)
+            _saved_buttons = self._input_state.mouse_buttons
+
+        # Hide menu bar
+        self.menuBar().hide()
+
+        # Hide status bar
+        self._status.hide()
+
+        # Enter fullscreen (may trigger focusOutEvent -> _set_kvm_active(False) -> clear_keys())
+        self.showFullScreen()
+
+        # Restore KVM state if it was lost during fullscreen transition
+        if was_kvm_active and not self._kvm_active:
+            self._set_kvm_active(True)
+            # Restore input state that was cleared by focusOutEvent
+            with self._input_state._lock:
+                self._input_state.modifier = _saved_modifier
+                self._input_state.pressed_keys.clear()
+                self._input_state.pressed_keys.extend(_saved_keys)
+                self._input_state.mouse_buttons = _saved_buttons
+        elif self._kvm_active:
+            self._recompute_center()
+
+        # Show fullscreen hint
+        self._show_fullscreen_hint()
+
+        # Show FPS overlay
+        self._fps_overlay.show()
+
+    def _exit_fullscreen(self) -> None:
+        """Exit fullscreen mode."""
+        self._is_fullscreen = False
+        self._fullscreen_hint_timer.stop()
+
+        # Save KVM state (showNormal may trigger focus events, mirror of _enter_fullscreen)
+        was_kvm_active = self._kvm_active
+
+        # Snapshot input state to survive focus-loss-induced clear
+        with self._input_state._lock:
+            _saved_modifier = self._input_state.modifier
+            _saved_keys = list(self._input_state.pressed_keys)
+            _saved_buttons = self._input_state.mouse_buttons
+
+        # Restore menu bar (respect KVM state)
+        if not self._kvm_active:
+            self.menuBar().show()
+            self.menuBar().setEnabled(True)
+        else:
+            self.menuBar().show()
+            self.menuBar().setEnabled(False)
+
+        # Restore status bar
+        self._status.show()
+
+        # Restore normal window (may trigger focusOutEvent -> KVM deactivation)
+        self.showNormal()
+
+        # Restore KVM state if it was lost during normal window transition
+        if was_kvm_active and not self._kvm_active:
+            self._set_kvm_active(True)
+            # Restore input state that was cleared by focusOutEvent
+            with self._input_state._lock:
+                self._input_state.modifier = _saved_modifier
+                self._input_state.pressed_keys.clear()
+                self._input_state.pressed_keys.extend(_saved_keys)
+                self._input_state.mouse_buttons = _saved_buttons
+        elif self._kvm_active:
+            self._recompute_center()
+
+        # Restore saved geometry and state
+        if self._pre_fullscreen_geometry is not None:
+            self.setGeometry(self._pre_fullscreen_geometry)
+        if self._pre_fullscreen_state is not None:
+            self.setWindowState(self._pre_fullscreen_state)
+
+        # Hide FPS overlay
+        self._fps_overlay.hide()
+
+        # Hide fullscreen hint
+        self._fullscreen_hint.hide()
+
+    def _recompute_center(self) -> None:
+        """Recalculate the VideoWidget centre in global coordinates."""
+        self._center = self._video_widget.mapToGlobal(
+            QPoint(
+                self._video_widget.width() // 2,
+                self._video_widget.height() // 2,
+            )
+        )
+
+    def _show_fullscreen_hint(self) -> None:
+        """Display fullscreen exit hint for 3 seconds."""
+        pw = self._video_widget
+        x = (pw.width() - self._fullscreen_hint.width()) // 2
+        y = pw.height() - self._fullscreen_hint.height() - 40
+        self._fullscreen_hint.move(x, y)
+        self._fullscreen_hint.show()
+        self._fullscreen_hint_timer.start(3000)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self._is_fullscreen and self._fullscreen_hint.isVisible():
+            pw = self._video_widget
+            x = (pw.width() - self._fullscreen_hint.width()) // 2
+            y = pw.height() - self._fullscreen_hint.height() - 40
+            self._fullscreen_hint.move(x, y)
 
     # -------------------------------------------------------------------------
     # Mouse events
@@ -315,6 +518,21 @@ class MainWindow(QMainWindow):
             build_mouse_report(self._input_state.mouse_buttons, 0, 0)
         )
 
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        """Double-click on video widget toggles fullscreen."""
+        if not self._kvm_active:
+            local = self._video_widget.mapFromGlobal(
+                event.globalPosition().toPoint()
+            )
+            in_widget = (
+                0 <= local.x() < self._video_widget.width()
+                and 0 <= local.y() < self._video_widget.height()
+            )
+            if in_widget:
+                self.toggle_fullscreen()
+                return
+        super().mouseDoubleClickEvent(event)
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if not self._kvm_active:
             return
@@ -325,12 +543,7 @@ class MainWindow(QMainWindow):
             return
 
         # Recompute centre every move in case the window was repositioned
-        self._center = self._video_widget.mapToGlobal(
-            QPoint(
-                self._video_widget.width()  // 2,
-                self._video_widget.height() // 2,
-            )
-        )
+        self._recompute_center()
 
         global_pos = event.globalPosition().toPoint()
         dx = global_pos.x() - self._center.x()
@@ -366,12 +579,21 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------------
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
-        # Esc always exits KVM focus mode — this MUST run before the
-        # _use_raw_input guard so it works even when Raw Input is broken.
-        if event.key() == Qt.Key.Key_Escape and self._kvm_active:
-            self._set_kvm_active(False)
+        # --- Priority 1: Escape handling ---
+        if event.key() == Qt.Key.Key_Escape:
+            if self._kvm_active:
+                self._set_kvm_active(False)
+                return
+            if self._is_fullscreen:
+                self.toggle_fullscreen()
+                return
+
+        # --- Priority 2: F11 fullscreen toggle (only when KVM is not active) ---
+        if event.key() == Qt.Key.Key_F11 and not self._kvm_active:
+            self.toggle_fullscreen()
             return
 
+        # --- Existing Raw Input / KVM handling below (DO NOT CHANGE) ---
         # When Raw Input is active, skip Qt keyboard events entirely
         # to avoid double-sending every keystroke.
         if self._use_raw_input and self._kvm_active:
@@ -471,9 +693,16 @@ class MainWindow(QMainWindow):
         if not self._kvm_active:
             return
 
-        # Escape always exits KVM focus mode
+        # Escape handling with fullscreen awareness
         if scancode == 0x01:  # Esc
-            self._set_kvm_active(False)
+            if self._is_fullscreen:
+                # KVM+fullscreen: first Esc exits KVM, second exits fullscreen
+                if self._kvm_active:
+                    self._set_kvm_active(False)
+                else:
+                    self.toggle_fullscreen()
+            else:
+                self._set_kvm_active(False)
             return
 
         # Modifier keys: use VK → modifier bit (full L/R discrimination)
@@ -531,6 +760,8 @@ class MainWindow(QMainWindow):
             self._set_kvm_active(False)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self._is_fullscreen:
+            self._exit_fullscreen()
         self._set_kvm_active(False)
         self._capture.stop()
         self._serial.stop()

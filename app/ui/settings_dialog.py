@@ -33,6 +33,7 @@ class SettingsDialog(QDialog):
         self,
         current_port: str = "",
         current_device: str = "",
+        current_aspect: str = "keep",
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -68,6 +69,14 @@ class SettingsDialog(QDialog):
             "",
             QLabel("Capture is always 1920x1080 @ 30 fps via FFmpeg"),
         )
+
+        # ---- Aspect ratio --------------------------------------------------
+        self._aspect_combo = QComboBox()
+        self._aspect_combo.addItem("Maintain Aspect Ratio")
+        self._aspect_combo.addItem("Stretch to Fill")
+        if current_aspect == "fill":
+            self._aspect_combo.setCurrentIndex(1)
+        layout.addRow("Aspect Ratio:", self._aspect_combo)
 
         # ---- Buttons -------------------------------------------------------
         buttons = QDialogButtonBox(
@@ -111,8 +120,9 @@ class SettingsDialog(QDialog):
     # Result accessors
     # ------------------------------------------------------------------
 
-    def get_values(self) -> tuple[str, str]:
-        """Return *(selected_port, selected_device_name)*."""
+    def get_values(self) -> tuple[str, str, str]:
+        """Return *(selected_port, selected_device_name, aspect_mode)*."""
         port = self._port_combo.currentText()
         device = self._device_combo.currentText()
-        return port, device
+        aspect = "keep" if self._aspect_combo.currentIndex() == 0 else "fill"
+        return port, device, aspect
