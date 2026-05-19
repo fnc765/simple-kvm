@@ -1,0 +1,106 @@
+name: Build Windows Installer
+
+on:
+  push:
+    tags: ['v*']
+    branches: ['main']
+    paths:
+      - 'app/**'
+      - 'simple-kvm.spec'
+      - 'installer.iss'
+      - 'installer_resources/**'
+      - 'pyproject.toml'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r app/requirements.txt
+          pip install pyinstaller pyinstaller-hooks-contrib
+
+      - name: Security audit
+        run: |
+          pip install pip-audit
+          pip-audit -r app/requirements.txt
+
+      - name: Build with PyInstaller
+        run: |
+          python -m PyInstaller --clean simple-kvm.spec
+
+      - name: Verify build output
+        run: |
+          if (-not (Test-Path "dist/simple-kvm/simple-kvm.exe")) {
+            Write-Error "EXE not found!"
+            exit 1
+          }
+          # Verify critical bundled files
+          if (-not (Test-Path "dist/simple-kvm/_internal/PySide6/plugins/platforms/qwindows.dll")) {
+            Write-Error "Qt platform plugin missing!"
+            exit 1
+          }
+          if (-not (Test-Path "dist/simple-kvm/_internal/av.libs/avcodec-*.dll")) {
+            Write-Error "FFmpeg DLLs missing!"
+            exit 1
+          }
+          Write-Host "=== Build output contents ==="
+          Get-ChildItem -Recurse dist/simple-kvm/ | Select-Object FullName, Length | Format-Table -AutoSize
+          Write-Host "=== EXE size: $((Get-Item dist/simple-kvm/simple-kvm.exe).Length) bytes ==="
+
+      - name: Install Inno Setup
+        run: choco install innosetup --version=6.4.1 -y --no-progress
+
+      - name: Verify license file
+        run: |
+          if (-not (Test-Path "installer_resources/license.txt")) {
+            Write-Error "License file not found!"
+            exit 1
+          }
+
+      - name: Build installer with Inno Setup
+        run: |
+          $innoDir = "${env:ProgramFiles(x86)}\Inno Setup 6"
+          if (Test-Path "$innoDir\ISCC.exe") {
+            & "$innoDir\ISCC.exe" installer.iss
+          } else {
+            Write-Error "Inno Setup ISCC.exe not found at: $innoDir"
+            exit 1
+          }
+
+      - name: Generate SHA256 checksum
+        run: |
+          $installer = Get-ChildItem Output/simple-kvm-*-setup.exe | Select-Object -First 1
+          $hash = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash
+          "$hash  $($installer.Name)" | Out-File -FilePath "Output/simple-kvm-sha256.txt" -Encoding utf8
+          Write-Host "SHA256: $hash"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: simple-kvm-installer
+          path: |
+            Output/simple-kvm-*-setup.exe
+            Output/simple-kvm-sha256.txt
+          if-no-files-found: error
+
+      - name: Upload build output artifact (for debugging)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-debug
+          retention-days: 7
+          path: |
+            build/simple-kvm/warn-simple-kvm.txt

@@ -72,6 +72,12 @@ simple-kvm/
 
 ### Python アプリ
 
+#### インストーラー版（推奨）
+
+[Releases](https://github.com/fnchoco/simple-kvm/releases) から `simple-kvm-x64-setup.exe` をダウンロードして実行してください。
+
+#### ソースから実行（開発者向け）
+
 ```powershell
 cd app
 python -m venv .venv
