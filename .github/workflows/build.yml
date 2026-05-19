@@ -26,16 +26,20 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
+        shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "=== Upgrading pip ==="
           python -m pip install --upgrade pip
+          Write-Host "=== Installing app requirements ==="
           pip install -r app/requirements.txt
+          Write-Host "=== Installing build tools ==="
           pip install "pyinstaller>=6.0,<7.0.0" "pyinstaller-hooks-contrib>=2024.0,<2027.0"
-
-      - name: Verify PySide6 installed
-        run: |
-          python -c "import PySide6; print('PySide6 version:', PySide6.__version__)"
+          Write-Host "=== Verifying ==="
+          python -c "import PySide6; print('PySide6', PySide6.__version__)"
           python -c "import PySide6.QtCore; print('QtCore OK')"
-          python -c "import av; print('av version:', av.__version__)"
+          python -c "import av; print('av', av.__version__)"
+          python -c "import pyserial; print('pyserial', pyserial.__version__)"
 
       - name: Security audit
         run: |
