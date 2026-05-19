@@ -25,12 +25,15 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
+          cache-dependency-path: |
+            app/requirements.txt
+            .github/workflows/build.yml
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r app/requirements.txt
-          pip install pyinstaller pyinstaller-hooks-contrib
+          pip install "pyinstaller>=6.0,<7.0.0" "pyinstaller-hooks-contrib>=2024.0,<2027.0"
 
       - name: Security audit
         run: |
@@ -43,19 +46,22 @@ jobs:
 
       - name: Verify build output
         run: |
-          if (-not (Test-Path "dist/simple-kvm/simple-kvm.exe")) {
-            Write-Error "EXE not found!"
-            exit 1
+          if (-not (Test-Path -Path "dist/simple-kvm/simple-kvm.exe" -PathType Leaf)) {
+            throw "EXE not found!"
           }
-          # Verify critical bundled files
-          if (-not (Test-Path "dist/simple-kvm/_internal/PySide6/plugins/platforms/qwindows.dll")) {
-            Write-Error "Qt platform plugin missing!"
-            exit 1
+          # Verify PySide6 Qt platform plugin (may be under PySide6/ or PySide6_Essentials/)
+          $pluginDlls = @(Get-ChildItem -Path "dist/simple-kvm/_internal/PySide6*/plugins/platforms/qwindows.dll" -ErrorAction SilentlyContinue)
+          if ($pluginDlls.Count -eq 0) {
+            throw "Qt platform plugin (qwindows.dll) missing!"
           }
-          if (-not (Test-Path "dist/simple-kvm/_internal/av.libs/avcodec-*.dll")) {
-            Write-Error "FFmpeg DLLs missing!"
-            exit 1
+          Write-Host "Qt platform plugin found: $($pluginDlls[0].FullName)"
+          # Verify FFmpeg DLLs
+          $ffmpegDlls = @(Get-ChildItem -Path "dist/simple-kvm/_internal/av.libs/avcodec-*.dll" -ErrorAction SilentlyContinue)
+          if ($ffmpegDlls.Count -eq 0) {
+            throw "FFmpeg DLLs (avcodec-*.dll) missing!"
           }
+          Write-Host "FFmpeg DLLs found: $($ffmpegDlls.Count) files"
+          # Show full build contents
           Write-Host "=== Build output contents ==="
           Get-ChildItem -Recurse dist/simple-kvm/ | Select-Object FullName, Length | Format-Table -AutoSize
           Write-Host "=== EXE size: $((Get-Item dist/simple-kvm/simple-kvm.exe).Length) bytes ==="
@@ -65,20 +71,17 @@ jobs:
 
       - name: Verify license file
         run: |
-          if (-not (Test-Path "installer_resources/license.txt")) {
-            Write-Error "License file not found!"
-            exit 1
+          if (-not (Test-Path -Path "installer_resources/license.txt" -PathType Leaf)) {
+            throw "License file not found!"
           }
 
       - name: Build installer with Inno Setup
         run: |
           $innoDir = "${env:ProgramFiles(x86)}\Inno Setup 6"
-          if (Test-Path "$innoDir\ISCC.exe") {
-            & "$innoDir\ISCC.exe" installer.iss
-          } else {
-            Write-Error "Inno Setup ISCC.exe not found at: $innoDir"
-            exit 1
+          if (-not (Test-Path "$innoDir\ISCC.exe")) {
+            throw "Inno Setup ISCC.exe not found at: $innoDir"
           }
+          & "$innoDir\ISCC.exe" installer.iss
 
       - name: Generate SHA256 checksum
         run: |
