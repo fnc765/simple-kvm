@@ -127,7 +127,7 @@ jobs:
           Write-Host "Total size: $size MB"
 
       - name: Install Inno Setup
-        run: choco install innosetup --version=6.4.1 -y --no-progress
+        run: choco install innosetup -y --no-progress --allow-downgrade
 
       - name: Verify license file
         run: |
