@@ -3,10 +3,6 @@
 
 Build command:
     pyinstaller --clean simple-kvm.spec
-
-Note: PyInstaller v6+ has built-in hooks for PySide6 and av that
-automatically collect plugins and FFmpeg DLLs. Explicit imports
-here are only for modules that the hooks may miss.
 """
 
 import importlib.util
@@ -15,13 +11,35 @@ from pathlib import Path
 _SPEC_DIR = Path(SPECPATH)
 
 
-def _find_package_dir(pkg_name: str) -> Path | None:
-    """Locate a package's directory without importing it."""
+def _get_package_dir(pkg_name: str) -> Path | None:
+    """Locate a package's install directory without importing it.
+    
+    Uses importlib's finder mechanism which only inspects filesystem
+    metadata -- no module code is executed. Works even when import
+    fails due to environment-specific runtime issues.
+    """
     spec = importlib.util.find_spec(pkg_name)
-    if spec and spec.origin:
+    if spec is None:
+        return None
+    # Prefer submodule_search_locations for packages (namespace/pkg)
+    if spec.submodule_search_locations:
+        return Path(spec.submodule_search_locations[0])
+    # Fallback to __init__.py location
+    if spec.origin:
         return Path(spec.origin).parent
     return None
 
+
+# --- Locate dependencies for data file bundling ---
+_pyside6_dir = _get_package_dir('PySide6')
+_av_dir = _get_package_dir('av')
+
+# Derive site-packages (for av.libs which sits alongside av/)
+_sp = None
+if _av_dir:
+    _sp = _av_dir.parent
+elif _pyside6_dir:
+    _sp = _pyside6_dir.parent
 
 # --- Hidden imports that PyInstaller may miss ---
 _hiddenimports = [
@@ -47,9 +65,19 @@ _hiddenimports = [
 ]
 
 # --- Data files to bundle ---
-# PyInstaller v6 hooks auto-collect PySide6 plugins and av.libs.
-# Only add custom data here if hooks miss something.
 _datas = []
+
+# PySide6 plugins (platforms, styles, imageformats etc.)
+if _pyside6_dir:
+    _plugins = _pyside6_dir / 'plugins'
+    if _plugins.exists():
+        _datas.append((str(_plugins), 'PySide6/plugins'))
+
+# av.libs (FFmpeg DLLs) -- sits alongside av/ in site-packages
+if _sp:
+    _avlibs = _sp / 'av.libs'
+    if _avlibs.exists():
+        _datas.append((str(_avlibs), 'av.libs'))
 
 # --- Excluded modules (reduce binary size) ---
 _excludes = [
