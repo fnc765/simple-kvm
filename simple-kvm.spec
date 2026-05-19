@@ -5,29 +5,15 @@ Build command:
     pyinstaller --clean simple-kvm.spec
 """
 
-import os
-import sys
 from pathlib import Path
 
-# --- Resolve site-packages path ---
+# --- Resolve package paths by direct import (robust on all environments) ---
 _SPEC_DIR = Path(SPECPATH)  # directory containing this spec file
 
+# Locate site-packages via PySide6's actual installation path
+import PySide6  # noqa: E402
 
-def _find_site_packages():
-    """Find the active site-packages directory (verified by PySide6 presence)."""
-    for p in sys.path:
-        basename = os.path.basename(str(p))
-        if basename in ("site-packages", "dist-packages"):
-            candidate = Path(p)
-            if (candidate / "PySide6").is_dir():
-                return candidate
-    raise RuntimeError(
-        "Could not find site-packages containing PySide6 in sys.path. "
-        "Ensure PySide6 is installed."
-    )
-
-
-_SP = _find_site_packages()
+_SP = Path(PySide6.__file__).resolve().parent.parent  # .../site-packages
 
 # --- Hidden imports that PyInstaller may miss ---
 _hiddenimports = [
