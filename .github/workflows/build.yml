@@ -31,6 +31,12 @@ jobs:
           pip install -r app/requirements.txt
           pip install "pyinstaller>=6.0,<7.0.0" "pyinstaller-hooks-contrib>=2024.0,<2027.0"
 
+      - name: Verify PySide6 installed
+        run: |
+          python -c "import PySide6; print('PySide6 version:', PySide6.__version__)"
+          python -c "import PySide6.QtCore; print('QtCore OK')"
+          python -c "import av; print('av version:', av.__version__)"
+
       - name: Security audit
         run: |
           pip install pip-audit
@@ -42,52 +48,53 @@ jobs:
       - name: Copy PySide6 plugins (post-build fallback)
         shell: pwsh
         run: |
-          $destPlugins = "dist/simple-kvm/_internal/PySide6/plugins"
-          if (Test-Path "$destPlugins/platforms/qwindows.dll") {
+          $dest = "dist/simple-kvm/_internal/PySide6/plugins"
+          if (Test-Path "$dest/platforms/qwindows.dll") {
             Write-Host "Plugins already bundled by PyInstaller hooks"
           } else {
-            Write-Host "Plugins NOT bundled -- locating via pip show..."
-            $location = $null
-            python -m pip show PySide6 2>&1 | ForEach-Object {
-              if ($_ -match '^Location:\s*(.+)$') { $location = $matches[1].Trim() }
-            }
-            if (-not $location) {
-              throw "pip show PySide6 failed -- no Location line found"
-            }
-            Write-Host "PySide6 installed at: $location"
+            Write-Host "Plugins NOT bundled -- searching via pythonLocation..."
+            $base = "$env:pythonLocation\Lib\site-packages"
+            Write-Host "Site-packages: $base"
             $found = $false
-            foreach ($dir in @("$location\PySide6\plugins", "$location\PySide6_Essentials\plugins")) {
+            foreach ($dir in @("$base\PySide6\plugins", "$base\PySide6_Essentials\plugins")) {
               if (Test-Path "$dir\platforms\qwindows.dll") {
-                Write-Host "Found plugins at: $dir"
-                New-Item -ItemType Directory -Force -Path $destPlugins | Out-Null
-                Copy-Item -Recurse "$dir\*" $destPlugins -Force
+                Write-Host "Found: $dir"
+                New-Item -ItemType Directory -Force -Path $dest | Out-Null
+                Copy-Item -Recurse "$dir\*" $dest -Force
                 $found = $true
                 break
               }
             }
             if (-not $found) {
-              Get-ChildItem "$location\PySide6*" -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "Found dir: $($_.FullName)" }
-              throw "Cannot find PySide6 plugins directory under $location"
+              Write-Host "Trying glob..."
+              $candidates = @(Get-ChildItem -Path "$base\PySide6*\plugins\platforms\qwindows.dll" -Recurse -ErrorAction SilentlyContinue)
+              if ($candidates.Count -gt 0) {
+                $src = $candidates[0].Directory.Parent.FullName
+                Write-Host "Found via glob: $src"
+                New-Item -ItemType Directory -Force -Path $dest | Out-Null
+                Copy-Item -Recurse "$src\*" $dest -Force
+                $found = $true
+              }
+            }
+            if (-not $found) {
+              Get-ChildItem "$base" -Directory -Filter "PySide6*" | ForEach-Object { Write-Host "PySide6 dir: $($_.FullName)" }
+              throw "Cannot find PySide6 plugins anywhere under $base"
             }
           }
 
       - name: Copy av.libs FFmpeg DLLs (post-build fallback)
         shell: pwsh
         run: |
-          $destAvlibs = "dist/simple-kvm/_internal/av.libs"
-          if (Test-Path "$destAvlibs/avcodec-*.dll") {
-            Write-Host "av.libs already bundled by PyInstaller hooks"
+          $dest = "dist/simple-kvm/_internal/av.libs"
+          if (Test-Path "$dest/avcodec-*.dll") {
+            Write-Host "av.libs already bundled"
           } else {
-            Write-Host "av.libs NOT bundled -- locating via pip show..."
-            $location = $null
-            python -m pip show av 2>&1 | ForEach-Object {
-              if ($_ -match '^Location:\s*(.+)$') { $location = $matches[1].Trim() }
-            }
-            $src = "$location\av.libs"
+            Write-Host "av.libs NOT bundled -- searching via pythonLocation..."
+            $src = "$env:pythonLocation\Lib\site-packages\av.libs"
             if (Test-Path $src) {
-              New-Item -ItemType Directory -Force -Path $destAvlibs | Out-Null
-              Copy-Item -Recurse "$src\*" $destAvlibs -Force
-              Write-Host "Copied av.libs from: $src"
+              New-Item -ItemType Directory -Force -Path $dest | Out-Null
+              Copy-Item -Recurse "$src\*" $dest -Force
+              Write-Host "Copied from: $src"
             } else {
               throw "av.libs not found at $src"
             }
