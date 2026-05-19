@@ -42,7 +42,7 @@ jobs:
           python -c "import PySide6; print('PySide6', PySide6.__version__)"
           python -c "import PySide6.QtCore; print('QtCore OK')"
           python -c "import av; print('av', av.__version__)"
-          python -c "import pyserial; print('pyserial', pyserial.__version__)"
+          python -c "import serial; print('pyserial', serial.__version__)"
 
       - name: Security audit
         run: |
