@@ -4,41 +4,87 @@
 Build command:
     pyinstaller --clean simple-kvm.spec
 
-Uses PyInstaller's collect_all() to bundle PySide6 plugins/FFmpeg DLLs
-without fragile path resolution. Works across PySide6 6.6 legacy layout
-and 6.8+ split layout (PySide6_Essentials/PySide6_Addons).
+Bundles PySide6 Qt plugins and FFmpeg DLLs via filesystem search
+to handle any PySide6 installation layout (6.6 legacy, 6.8+ split).
 """
 
+import sys
 from pathlib import Path
-
-from PyInstaller.utils.hooks import collect_all
 
 _SPEC_DIR = Path(SPECPATH)
 
-# --- Collect all data/binaries/submodules from key packages ---
-# collect_all returns (datas, binaries, hiddenimports) tuple for each package.
+
+def _find_plugins_dir() -> Path | None:
+    """Search site-packages for PySide6 plugins directory by filesystem scan.
+
+    PySide6 6.6.x:  .../site-packages/PySide6/plugins/
+    PySide6 6.8+:   .../site-packages/PySide6_Essentials/plugins/
+    """
+    for p in sys.path:
+        sp = Path(p)
+        if not sp.is_dir():
+            continue
+        for candidate in ('PySide6_Essentials/plugins',
+                          'PySide6/plugins'):
+            plugins_dir = sp / candidate
+            if plugins_dir.is_dir():
+                return plugins_dir
+    return None
+
+
+def _find_av_libs_dir() -> Path | None:
+    """Search site-packages for av.libs (FFmpeg DLLs)."""
+    for p in sys.path:
+        sp = Path(p)
+        if not sp.is_dir():
+            continue
+        avlibs = sp / 'av.libs'
+        if avlibs.is_dir():
+            return avlibs
+    return None
+
+
+# --- Data files to bundle ---
 _datas = []
-_binaries = []
-_hiddenimports = []
 
-for _pkg in ('PySide6', 'PySide6_Essentials', 'av'):
-    _d, _b, _h = collect_all(_pkg)
-    _datas.extend(_d)
-    _binaries.extend(_b)
-    _hiddenimports.extend(_h)
+_plugins_dir = _find_plugins_dir()
+if _plugins_dir:
+    _datas.append((str(_plugins_dir), 'PySide6/plugins'))
+    print(f"Bundling PySide6 plugins from: {_plugins_dir}", file=sys.stderr)
+else:
+    print(
+        "ERROR: PySide6 plugins directory not found anywhere in sys.path. "
+        "The built EXE will fail to start (qt.qpa.plugin error).",
+        file=sys.stderr,
+    )
 
-# Additional hidden imports that collect_all may miss
-_hiddenimports.extend([
+_av_libs_dir = _find_av_libs_dir()
+if _av_libs_dir:
+    _datas.append((str(_av_libs_dir), 'av.libs'))
+    print(f"Bundling av.libs from: {_av_libs_dir}", file=sys.stderr)
+else:
+    print("ERROR: av.libs (FFmpeg DLLs) not found in sys.path.", file=sys.stderr)
+
+# --- Hidden imports ---
+_hiddenimports = [
     'PySide6.QtCore',
     'PySide6.QtGui',
     'PySide6.QtWidgets',
     'PySide6.QtNetwork',
+    'av',
+    'av.codec',
+    'av.format',
+    'av.container',
+    'av.stream',
+    'av.filter',
+    'av.sidedata',
     'av.codec.codec',
     'av.codec.context',
     'pygrabber.dshow_graph',
-])
+    'numpy',
+]
 
-# --- Excluded modules (reduce binary size) ---
+# --- Excluded modules ---
 _excludes = [
     'tkinter',
     'unittest',
@@ -50,7 +96,7 @@ _excludes = [
 a = Analysis(
     ['app/__main__.py'],
     pathex=['.'],
-    binaries=_binaries,
+    binaries=[],
     datas=_datas,
     hiddenimports=_hiddenimports,
     hookspath=[],
@@ -71,7 +117,6 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name='simple-kvm',
-    # icon=str(_SPEC_DIR / 'installer_resources/app_icon.ico'),
     icon=None,
     debug=False,
     bootloader_ignore_signals=False,

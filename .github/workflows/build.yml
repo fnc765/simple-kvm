@@ -35,6 +35,32 @@ jobs:
           pip install -r app/requirements.txt
           pip install "pyinstaller>=6.0,<7.0.0" "pyinstaller-hooks-contrib>=2024.0,<2027.0"
 
+      - name: Diagnose PySide6 installation
+        run: |
+          Write-Host "=== PySide6 packages ==="
+          pip list 2>&1 | Select-String -Pattern "PySide6|pyside6"
+          Write-Host "=== PySide6 files location ==="
+          python -c "import sys; [print(p) for p in sys.path]"
+          Write-Host "=== Searching for plugins ==="
+          python -c "
+          import sys
+          from pathlib import Path
+          for p in sys.path:
+              sp = Path(p)
+              if not sp.is_dir(): continue
+              for name in ('PySide6_Essentials', 'PySide6'):
+                  plugins = sp / name / 'plugins' / 'platforms'
+                  if plugins.is_dir():
+                      qw = plugins / 'qwindows.dll'
+                      print(f'FOUND: {qw} (exists={qw.exists()})')
+                      break
+              else:
+                  continue
+              break
+          else:
+              print('NOT FOUND: qwindows.dll not located in sys.path')
+          "
+
       - name: Security audit
         run: |
           pip install pip-audit
