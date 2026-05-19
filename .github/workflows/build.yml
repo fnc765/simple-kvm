@@ -29,13 +29,16 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          Write-Host "=== Upgrading pip ==="
-          python -m pip install --upgrade pip
+          Write-Host "=== Python: $(python --version) ==="
+          Write-Host "=== Before: pip list PySide6 ==="
+          pip list 2>&1 | Select-String PySide6
           Write-Host "=== Installing app requirements ==="
-          pip install -r app/requirements.txt
+          pip install --no-cache-dir --only-binary :all: -r app/requirements.txt 2>&1
           Write-Host "=== Installing build tools ==="
-          pip install "pyinstaller>=6.0,<7.0.0" "pyinstaller-hooks-contrib>=2024.0,<2027.0"
-          Write-Host "=== Verifying ==="
+          pip install --no-cache-dir "pyinstaller>=6.0,<7.0.0" "pyinstaller-hooks-contrib>=2024.0,<2027.0"
+          Write-Host "=== After: pip list PySide6 ==="
+          pip list 2>&1 | Select-String PySide6
+          Write-Host "=== Verifying imports ==="
           python -c "import PySide6; print('PySide6', PySide6.__version__)"
           python -c "import PySide6.QtCore; print('QtCore OK')"
           python -c "import av; print('av', av.__version__)"
