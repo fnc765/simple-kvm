@@ -46,11 +46,15 @@ jobs:
           if (Test-Path "$destPlugins/platforms/qwindows.dll") {
             Write-Host "Plugins already bundled by PyInstaller hooks"
           } else {
-            Write-Host "Plugins NOT bundled -- copying manually..."
-            $pipInfo = pip show PySide6 2>&1 | Out-String
-            $location = ($pipInfo | Select-String "Location:").ToString().Trim() -replace "Location:\s*", ""
-            Write-Host "PySide6 Location from pip: $location"
-            # Search for plugins in all PySide6* directories
+            Write-Host "Plugins NOT bundled -- locating via pip show..."
+            $location = $null
+            python -m pip show PySide6 2>&1 | ForEach-Object {
+              if ($_ -match '^Location:\s*(.+)$') { $location = $matches[1].Trim() }
+            }
+            if (-not $location) {
+              throw "pip show PySide6 failed -- no Location line found"
+            }
+            Write-Host "PySide6 installed at: $location"
             $found = $false
             foreach ($dir in @("$location\PySide6\plugins", "$location\PySide6_Essentials\plugins")) {
               if (Test-Path "$dir\platforms\qwindows.dll") {
@@ -62,6 +66,7 @@ jobs:
               }
             }
             if (-not $found) {
+              Get-ChildItem "$location\PySide6*" -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "Found dir: $($_.FullName)" }
               throw "Cannot find PySide6 plugins directory under $location"
             }
           }
@@ -73,15 +78,16 @@ jobs:
           if (Test-Path "$destAvlibs/avcodec-*.dll") {
             Write-Host "av.libs already bundled by PyInstaller hooks"
           } else {
-            Write-Host "av.libs NOT bundled -- copying manually..."
-            $pipInfo = pip show av 2>&1 | Out-String
-            $location = ($pipInfo | Select-String "Location:").ToString().Trim() -replace "Location:\s*", ""
-            Write-Host "av Location from pip: $location"
+            Write-Host "av.libs NOT bundled -- locating via pip show..."
+            $location = $null
+            python -m pip show av 2>&1 | ForEach-Object {
+              if ($_ -match '^Location:\s*(.+)$') { $location = $matches[1].Trim() }
+            }
             $src = "$location\av.libs"
             if (Test-Path $src) {
               New-Item -ItemType Directory -Force -Path $destAvlibs | Out-Null
               Copy-Item -Recurse "$src\*" $destAvlibs -Force
-              Write-Host "Copied av.libs successfully"
+              Write-Host "Copied av.libs from: $src"
             } else {
               throw "av.libs not found at $src"
             }
