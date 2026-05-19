@@ -3,17 +3,25 @@
 
 Build command:
     pyinstaller --clean simple-kvm.spec
+
+Note: PyInstaller v6+ has built-in hooks for PySide6 and av that
+automatically collect plugins and FFmpeg DLLs. Explicit imports
+here are only for modules that the hooks may miss.
 """
 
+import importlib.util
 from pathlib import Path
 
-# --- Resolve package paths by direct import (robust on all environments) ---
-_SPEC_DIR = Path(SPECPATH)  # directory containing this spec file
+_SPEC_DIR = Path(SPECPATH)
 
-# Locate site-packages via PySide6's actual installation path
-import PySide6  # noqa: E402
 
-_SP = Path(PySide6.__file__).resolve().parent.parent  # .../site-packages
+def _find_package_dir(pkg_name: str) -> Path | None:
+    """Locate a package's directory without importing it."""
+    spec = importlib.util.find_spec(pkg_name)
+    if spec and spec.origin:
+        return Path(spec.origin).parent
+    return None
+
 
 # --- Hidden imports that PyInstaller may miss ---
 _hiddenimports = [
@@ -30,7 +38,6 @@ _hiddenimports = [
     'av.stream',
     'av.filter',
     'av.sidedata',
-    # av codec implementations (dynamic loading)
     'av.codec.codec',
     'av.codec.context',
     # pygrabber -- DirectShow device enumeration
@@ -40,17 +47,9 @@ _hiddenimports = [
 ]
 
 # --- Data files to bundle ---
+# PyInstaller v6 hooks auto-collect PySide6 plugins and av.libs.
+# Only add custom data here if hooks miss something.
 _datas = []
-
-# Bundle PySide6 plugins (platforms, styles, imageformats etc.)
-_qtdir = _SP / 'PySide6'
-if _qtdir.exists():
-    _datas.append((str(_qtdir / 'plugins'), 'PySide6/plugins'))
-
-# Bundle av.libs (FFmpeg DLLs)
-_avlibs = _SP / 'av.libs'
-if _avlibs.exists():
-    _datas.append((str(_avlibs), 'av.libs'))
 
 # --- Excluded modules (reduce binary size) ---
 _excludes = [
@@ -73,8 +72,6 @@ a = Analysis(
     excludes=_excludes,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
-    # Bytecode encryption: set to a block_cipher for basic obfuscation.
-    # Generate key: from PyInstaller.building.utils import block_cipher
     cipher=None,
     noarchive=False,
 )
@@ -87,7 +84,6 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name='simple-kvm',
-    # Set to icon path when available:
     # icon=str(_SPEC_DIR / 'installer_resources/app_icon.ico'),
     icon=None,
     debug=False,
@@ -95,10 +91,9 @@ exe = EXE(
     strip=False,
     upx=False,  # Disabled for AV compatibility
     console=False,
-    disable_windowed_traceback=True,  # Suppress Python traceback dialog in release builds
+    disable_windowed_traceback=True,
     argv_emulation=False,
     target_arch=None,
-    # Code signing: set to your code signing identity when available
     codesign_identity=None,
     entitlements_file=None,
 )
