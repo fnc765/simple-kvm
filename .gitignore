@@ -4,19 +4,32 @@
 .piolibdeps/
 
 # Python
-app/.venv/
-app/__pycache__/
-app/*.pyc
-app/**/__pycache__/
-app/**/*.pyc
-*.pyc
+.venv/
 __pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
 
 # IDE
 .vscode/
 .idea/
 
-# Build artifacts
+# Build artifacts (firmware)
 *.elf
 *.bin
 *.hex
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec.bak
+
+# Inno Setup output
+Output/
+
+# PyInstaller work files
+*.pyz
+*.pkg
