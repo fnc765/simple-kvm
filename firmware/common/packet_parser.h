@@ -10,13 +10,15 @@
 
 #define PKT_START      0xAAu
 #define PKT_KEYBOARD   0x01u  // 8-byte HID Boot Keyboard Report
-#define PKT_MOUSE      0x02u  // 5-byte HID Mouse Report
+#define PKT_MOUSE      0x02u  // 5-byte HID Mouse Report (relative)
+#define PKT_MOUSE_ABS  0x03u  // 5-byte HID Absolute Mouse Report (Phase 3 firmware)
 #define PKT_HEARTBEAT  0xFFu  // No payload (LEN=0)
 
-#define PKT_LEN_KEYBOARD   8u
-#define PKT_LEN_MOUSE      5u
-#define PKT_LEN_HEARTBEAT  0u
-#define PKT_MAX_PAYLOAD   16u  // Reject packets with LEN > this
+#define PKT_LEN_KEYBOARD    8u
+#define PKT_LEN_MOUSE       5u
+#define PKT_LEN_MOUSE_ABS   5u
+#define PKT_LEN_HEARTBEAT   0u
+#define PKT_MAX_PAYLOAD     16u  // Reject packets with LEN > this
 
 // CRC-8-CCITT (polynomial 0x07)
 uint8_t crc8_calc(const uint8_t *data, uint8_t len);

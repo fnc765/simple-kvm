@@ -32,3 +32,21 @@ bool validate_mouse_report(const uint8_t *payload, uint8_t len)
 
     return true;
 }
+
+bool validate_mouse_abs_report(const uint8_t *payload, uint8_t len)
+{
+    if (len < 5) return false;
+
+    // Buttons: only bits 0-2 are defined (Left/Right/Middle)
+    // Bits 3-7 should be 0
+    if (payload[0] & 0xF8) return false;
+
+    // x / y must be 0..32767 (host side clamps before sending, but
+    // belt-and-braces here in case the host is misbehaving).
+    uint16_t x = (uint16_t)payload[1] | ((uint16_t)payload[2] << 8);
+    uint16_t y = (uint16_t)payload[3] | ((uint16_t)payload[4] << 8);
+    if (x > HID_ABS_MAX_VALUE) return false;
+    if (y > HID_ABS_MAX_VALUE) return false;
+
+    return true;
+}

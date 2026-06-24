@@ -30,7 +30,7 @@ BluePill への書き込みには ST-Link デバッガが必要です。
 | 環境 | USB 機能 | ウォッチドッグ | ビルドフラグ |
 |------|----------|----------------|--------------|
 | bluepill1 | CDC Serial | あり (4 秒) | `-D PIO_FRAMEWORK_ARDUINO_ENABLE_CDC` |
-| bluepill2 | HID Composite (内蔵) | あり (4 秒) | `-D USBCON -D USBD_USE_HID_COMPOSITE` |
+| bluepill2 | HID Composite 3-interface (Phase 3) | あり (4 秒) | `-D USBCON -D USBD_USE_HID_COMPOSITE` |
 
 いずれの環境も `upload_protocol = stlink` です。
 
@@ -64,15 +64,24 @@ pio run -e bluepill2 --target upload
 | 環境 | RAM 使用 | Flash 使用 |
 |------|----------|------------|
 | bluepill1 | ~22% (4.5KB) | ~42% (27KB) |
-| bluepill2 | ~18% (3.7KB) | ~36% (23KB) |
+| bluepill2 | ~18% (3.7KB) | ~40% (25.4KB) |
 
 ### 2-5. BP2 の USB 設定について
 
 BP2 は STM32duino フレームワークに内蔵された HID Composite (`USBD_USE_HID_COMPOSITE`) を使用します。
 旧 libmaple 向けの外部ライブラリ `USBComposite_stm32f1` (arpruss) は不要です。
 
-BP2 の HID Composite は 4 バイトのマウスレポート `[buttons, dx, dy, wheel_v]` を送信します。
-水平スクロール（wheel_h）は STM32duino 内蔵 HID Composite が非サポートのため、受信しても破棄されます。
+BP2 の HID Composite は **3 つの HID インターフェース**を露出します (Phase 3 ファームウェア):
+
+| Interface | Class | Protocol | Report |
+|-----------|-------|----------|--------|
+| 0 (Keyboard) | HID | Boot Keyboard (LED 出力付き) | 8 バイト入力 + 1 バイト出力 (LED) |
+| 1 (Mouse)    | HID | Boot Mouse (5-byte relative) | `[buttons, dx, dy, wheel_v, wheel_h]` |
+| 2 (Abs Mouse) | HID | Generic Desktop Mouse (absolute) | `[buttons, x_lo, x_hi, y_lo, y_hi]` |
+
+絶対座標マウスを使うには、ホスト側 Settings の **「Firmware supports absolute HID」** チェックボックスをオンにしてください。オフのときは absolute HID 用のパケット (`PKT_MOUSE_ABS`) は送られないので、レガシーフレームウェア (Phase 1〜2) でも問題なく動作します。
+
+水平スクロール (wheel_h) は STM32duino 内蔵 HID Composite が非サポートのため、受信しても破棄されます。
 
 ---
 
@@ -85,6 +94,20 @@ BP2 の HID Composite は 4 バイトのマウスレポート `[buttons, dx, dy,
 | GND | ↔ | GND |
 
 両ボード間は**クロス接続**（TX ↔ RX）してください。
+
+---
+
+## 3.5. Windows descriptor cache について (Phase 3 firmware)
+
+Phase 3 BP2 firmware は **3-interface HID composite** (Keyboard + Relative Mouse + Absolute Mouse) を公開します。インターフェース数が変わるので、Windows が古い 2-interface ディスクリプタをキャッシュしていると、初回接続時に「不明な USB デバイス」になることがあります。
+
+Phase 3 firmware を書き込んだ後、ターゲット PC で以下を試してください:
+
+1. **USB ポートを差し替える** — 別ポートに挿すと Windows が新しいディスクリプタを読み直す
+2. **デバイス マネージャー → デバイスを表示 (非表示デバイスを含む) → 該当の "Logitech USB Receiver" (046D:C52B) をアンインストール** して再挿す
+3. **bcdDevice の bump** — `usbd_desc_patch.c` の `0x01, /* bcdDevice rel. 24.01 */` をさらに `0x02` などに上げて再ビルド (VID/PID/Product string は変えません)
+
+VID/PID/Product string (`046D:C52B` / `Logitech` / `USB Receiver`) は Logitech Unifying Receiver エミュレーション維持のため、Phase 3 firmware でも変更しません。bcdDevice のみが 24.00 → 24.01 に bump されています。
 
 ---
 
