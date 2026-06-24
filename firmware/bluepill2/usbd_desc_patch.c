@@ -5,6 +5,7 @@
   *
   * Changes from original usbd_desc.c:
   *   (a) bcdDevice: 2.00 → 24.00 (0x00,0x18)
+  *   (a2) bcdDevice: 24.00 → 24.01 (0x01,0x18) for Phase 3 absolute mouse
   *   (b) bMaxPacketSize: 0x08 (Logitech C52B uses EP0 size 8)
   *   (c) iSerial: 0x00 (no serial number string, matching Logitech C52B)
   *   (d) USBD_SerialStrDescriptor returns length 0 (iSerial=0 equivalent)
@@ -148,7 +149,7 @@ USBD_DescriptorsTypeDef USBD_Desc = {
 
 #ifdef USBD_USE_HID_COMPOSITE
 /* USB Standard Device Descriptor
- * PATCHED: bMaxPacketSize=0x08, bcdDevice=24.00, iSerial=0x00 */
+ * PATCHED: bMaxPacketSize=0x08, bcdDevice=24.01 (Phase 3), iSerial=0x00 */
 __ALIGN_BEGIN uint8_t USBD_Class_DeviceDesc[USB_LEN_DEV_DESC] __ALIGN_END = {
   0x12,                       /* bLength */
   USB_DESC_TYPE_DEVICE,       /* bDescriptorType */
@@ -167,7 +168,7 @@ __ALIGN_BEGIN uint8_t USBD_Class_DeviceDesc[USB_LEN_DEV_DESC] __ALIGN_END = {
   HIBYTE(USBD_VID),           /* idVendor */
   LOBYTE(USBD_PID),           /* idProduct */
   HIBYTE(USBD_PID),           /* idProduct */
-  0x00,                       /* bcdDevice rel. 24.00 */
+  0x01,                       /* bcdDevice rel. 24.01 (Phase 3) */
   0x18,
   USBD_IDX_MFC_STR,           /* Index of manufacturer string */
   USBD_IDX_PRODUCT_STR,       /* Index of product string */
@@ -196,7 +197,7 @@ __ALIGN_BEGIN uint8_t USBD_Class_DeviceDesc[USB_LEN_DEV_DESC] __ALIGN_END = {
   HIBYTE(USBD_VID),           /* idVendor */
   LOBYTE(USBD_PID),           /* idProduct */
   HIBYTE(USBD_PID),           /* idProduct */
-  0x00,                       /* bcdDevice rel. 24.00 */
+  0x00,                       /* bcdDevice rel. 24.00 (BP1 unchanged) */
   0x18,
   USBD_IDX_MFC_STR,           /* Index of manufacturer string */
   USBD_IDX_PRODUCT_STR,       /* Index of product string */

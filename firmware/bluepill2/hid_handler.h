@@ -43,6 +43,31 @@ typedef struct __attribute__((packed)) {
     int8_t  wheel_h;
 } KVMMouseReport;
 
+/**
+ * 5-byte HID Absolute Mouse Report (Phase 3 firmware only).
+ *
+ * Sent to the absolute-mouse interface (Interface 2 in the 3-interface
+ * HID composite).  The host sends a position in normalised
+ * 0..32767 coordinates that the target OS maps to its desktop
+ * resolution.
+ *
+ *   [0] buttons – bit0=Left, bit1=Right, bit2=Middle
+ *   [1] x_lo    – uint16 little-endian absolute X (0..32767)
+ *   [2] x_hi
+ *   [3] y_lo    – uint16 little-endian absolute Y (0..32767)
+ *   [4] y_hi
+ *
+ * See docs/protocol.md for the full specification.
+ */
+typedef struct __attribute__((packed)) {
+    uint8_t  buttons;
+    uint16_t x;
+    uint16_t y;
+} KVMMouseAbsReport;
+
+// Maximum value of the absolute coordinate (matches host-side HID_ABS_MAX).
+#define HID_ABS_MAX_VALUE 32767u
+
 // Convenience bitmasks
 #define MOUSE_BTN_LEFT   0x01u
 #define MOUSE_BTN_RIGHT  0x02u
@@ -51,3 +76,4 @@ typedef struct __attribute__((packed)) {
 // HID report validation
 bool validate_keyboard_report(const uint8_t *payload, uint8_t len);
 bool validate_mouse_report(const uint8_t *payload, uint8_t len);
+bool validate_mouse_abs_report(const uint8_t *payload, uint8_t len);

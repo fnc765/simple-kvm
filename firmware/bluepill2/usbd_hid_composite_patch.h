@@ -40,19 +40,45 @@ extern "C" {
 #endif
 #define HID_FS_BINTERVAL              0x08U
 
+/* PATCHED: Extend endpoint count from 3 to 4 to accommodate the
+ * absolute-mouse IN endpoint.  The matching usbd_ep_conf.c override
+ * lives in firmware/bluepill2/usbd_ep_conf.c. */
+#ifdef USBD_USE_HID_COMPOSITE
+  #ifdef DEV_NUM_EP
+    #undef DEV_NUM_EP
+  #endif
+  #define DEV_NUM_EP                  0x04U
+#endif
+
 /** @defgroup USBD_HID_Exported_Defines
   * @{
   */
-/* PATCHED: Keyboard is interface 0, Mouse is interface 1 */
+/* PATCHED: Keyboard is interface 0, Mouse is interface 1,
+ *          Absolute Mouse is interface 2 (Phase 3) */
 #define HID_MOUSE_INTERFACE           0x01U
 #define HID_KEYBOARD_INTERFACE        0x00U
+#define HID_ABS_MOUSE_INTERFACE       0x02U
 
-#define USB_COMPOSITE_HID_CONFIG_DESC_SIZ       59U
+/* PATCHED: 3rd IN endpoint for the absolute mouse (Phase 3).
+ * Keyboard uses 0x82, relative Mouse uses 0x81, so we pick 0x83. */
+#ifndef HID_ABS_MOUSE_EPIN_ADDR
+#define HID_ABS_MOUSE_EPIN_ADDR       0x83U
+#endif
+#define HID_ABS_MOUSE_EPIN_SIZE       0x08U
+
+/* PATCHED: 2 interfaces (Keyboard, Relative Mouse) -> 59 bytes
+ *          3 interfaces (+ Absolute Mouse)            -> 84 bytes
+ *          (each HID interface block = 9 + 9 + 7 = 25 bytes) */
+#define USB_COMPOSITE_HID_CONFIG_DESC_SIZ       84U
 #define USB_HID_DESC_SIZ              9U
 /* PATCHED: 5-byte mouse report (buttons + X + Y + wheel_v + wheel_h) */
 #define HID_MOUSE_REPORT_DESC_SIZE    76U
 /* PATCHED: Boot Keyboard with LED output (67 bytes) */
 #define HID_KEYBOARD_REPORT_DESC_SIZE 67U
+/* Absolute Mouse report descriptor: Generic Desktop Mouse with 3 buttons
+ * and absolute uint16 X / Y.  See HID_ABS_MOUSE_ReportDesc in
+ * usbd_hid_composite_patch.c.  Size = 51 bytes (counted below). */
+#define HID_ABS_MOUSE_REPORT_DESC_SIZE 51U
 
 #define HID_DESCRIPTOR_TYPE           0x21
 #define HID_REPORT_DESC               0x22
@@ -89,6 +115,7 @@ typedef struct {
   uint32_t             AltSetting;
   HID_StateTypeDef     Mousestate;
   HID_StateTypeDef     Keyboardstate;
+  HID_StateTypeDef     AbsMousestate;
 } USBD_HID_HandleTypeDef;
 
 /*
@@ -142,6 +169,10 @@ uint8_t USBD_HID_KEYBOARD_SendReport(USBD_HandleTypeDef *pdev,
                                      uint8_t *report,
                                      uint16_t len,
                                      uint8_t ClassId);
+uint8_t USBD_HID_ABS_MOUSE_SendReport(USBD_HandleTypeDef *pdev,
+                                      uint8_t *report,
+                                      uint16_t len,
+                                      uint8_t ClassId);
 #else
 uint8_t USBD_HID_MOUSE_SendReport(USBD_HandleTypeDef *pdev,
                                   uint8_t *report,
@@ -149,9 +180,23 @@ uint8_t USBD_HID_MOUSE_SendReport(USBD_HandleTypeDef *pdev,
 uint8_t USBD_HID_KEYBOARD_SendReport(USBD_HandleTypeDef *pdev,
                                      uint8_t *report,
                                      uint16_t len);
+uint8_t USBD_HID_ABS_MOUSE_SendReport(USBD_HandleTypeDef *pdev,
+                                      uint8_t *report,
+                                      uint16_t len);
 #endif /* USE_USBD_COMPOSITE */
 
 uint32_t USBD_HID_GetPollingInterval(USBD_HandleTypeDef *pdev);
+
+/* PATCHED: bridge function for the absolute mouse interface.  Called
+ * from main.cpp when a PKT_MOUSE_ABS packet is received.  Defined in
+ * usbd_hid_composite_patch.c. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+uint8_t HID_Composite_abs_mouse_sendReport(uint8_t *report, uint16_t len);
+#ifdef __cplusplus
+}
+#endif
 
 #ifdef __cplusplus
 }

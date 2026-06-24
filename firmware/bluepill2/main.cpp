@@ -10,8 +10,12 @@
 #include <Arduino.h>
 #include <IWatchdog.h>
 #include "usbd_hid_composite_if.h"
+#include "usbd_hid_composite_patch.h"
 #include "../common/packet_parser.h"
 #include "hid_handler.h"
+
+// USB device handle, defined in the framework's usbd_hid_composite_if.c.
+extern USBD_HandleTypeDef hUSBD_Device_HID;
 
 static PacketParser g_parser;
 static Packet       g_pkt;
@@ -45,6 +49,17 @@ static void hid_send_mouse(const Packet *p)
     HID_Composite_mouse_sendReport(report, sizeof(report));
 }
 
+static void hid_send_mouse_abs(const Packet *p)
+{
+    if (p->len != PKT_LEN_MOUSE_ABS) return;
+    if (!validate_mouse_abs_report(p->payload, p->len)) { g_err_count = 6; return; }
+    // Payload is [buttons, x_lo, x_hi, y_lo, y_hi] - little-endian
+    // uint16 X/Y, already in HID order.  Forward the 5 bytes as-is to
+    // the absolute-mouse endpoint (Interface 2).
+    USBD_HID_ABS_MOUSE_SendReport(&hUSBD_Device_HID,
+                                  (uint8_t *)p->payload, PKT_LEN_MOUSE_ABS);
+}
+
 void setup()
 {
     pinMode(LED_PIN, OUTPUT);
@@ -75,8 +90,9 @@ void loop()
         uint8_t b = static_cast<uint8_t>(Serial1.read());
         if (parser_feed(&g_parser, b, &g_pkt)) {
             switch (g_pkt.type) {
-                case PKT_KEYBOARD: hid_send_keyboard(&g_pkt); break;
-                case PKT_MOUSE:    hid_send_mouse(&g_pkt);    break;
+                case PKT_KEYBOARD:   hid_send_keyboard(&g_pkt); break;
+                case PKT_MOUSE:      hid_send_mouse(&g_pkt);    break;
+                case PKT_MOUSE_ABS:  hid_send_mouse_abs(&g_pkt); break;
                 case PKT_HEARTBEAT:
                     g_led_state = !g_led_state;
                     digitalWrite(LED_PIN, g_led_state ? LOW : HIGH);
