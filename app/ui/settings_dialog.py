@@ -10,6 +10,7 @@ import serial.tools.list_ports
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -21,6 +22,14 @@ from PySide6.QtWidgets import (
 )
 
 from core.capture import list_dshow_devices
+
+
+# Display labels for the Mouse Mode combo box.  ``(value, label)`` pairs.
+_MOUSE_MODE_OPTIONS: list[tuple[str, str]] = [
+    ("relative", "Relative (warp to center)"),
+    ("hybrid",   "Hybrid (jump on activation, then relative)"),
+    ("absolute", "Absolute (desktop / overlay helper)"),
+]
 
 
 class SettingsDialog(QDialog):
@@ -37,6 +46,8 @@ class SettingsDialog(QDialog):
         current_device: str = "",
         current_aspect: str = "keep",
         current_speed: float = 1.0,
+        current_mouse_mode: str = "relative",
+        current_firmware_abs_supported: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -100,6 +111,36 @@ class SettingsDialog(QDialog):
 
         self._speed_slider.valueChanged.connect(self._on_speed_changed)
 
+        # ---- Mouse mode ---------------------------------------------------
+        self._mode_combo = QComboBox()
+        for value, label in _MOUSE_MODE_OPTIONS:
+            self._mode_combo.addItem(label, value)
+        # Map current_mouse_mode -> current index (default 0 = relative)
+        mode_index = 0
+        for i, (value, _label) in enumerate(_MOUSE_MODE_OPTIONS):
+            if value == current_mouse_mode:
+                mode_index = i
+                break
+        self._mode_combo.setCurrentIndex(mode_index)
+        layout.addRow("Mouse Mode:", self._mode_combo)
+        layout.addRow(
+            "",
+            QLabel("Mouse Speed applies to Relative / Hybrid movement only."),
+        )
+
+        # ---- Firmware supports absolute HID -------------------------------
+        self._firmware_abs_checkbox = QCheckBox(
+            "Firmware supports absolute HID (Phase 3 BP2 firmware)"
+        )
+        self._firmware_abs_checkbox.setChecked(bool(current_firmware_abs_supported))
+        self._firmware_abs_checkbox.setToolTip(
+            "Enable only if BluePill #2 has been flashed with the\n"
+            "3-interface HID composite firmware that exposes an\n"
+            "absolute mouse interface.  Older firmware will blink\n"
+            "an error when it receives PKT_MOUSE_ABS."
+        )
+        layout.addRow("", self._firmware_abs_checkbox)
+
         # ---- Buttons -------------------------------------------------------
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -147,10 +188,12 @@ class SettingsDialog(QDialog):
     # Result accessors
     # ------------------------------------------------------------------
 
-    def get_values(self) -> tuple[str, str, str, float]:
-        """Return *(selected_port, selected_device_name, aspect_mode, mouse_speed)*."""
+    def get_values(self) -> tuple[str, str, str, float, str, bool]:
+        """Return *(port, device, aspect, speed, mouse_mode, firmware_abs_supported)*."""
         port = self._port_combo.currentText()
         device = self._device_combo.currentText()
         aspect = "keep" if self._aspect_combo.currentIndex() == 0 else "fill"
         speed = 0.5 + self._speed_slider.value() * 0.1
-        return port, device, aspect, speed
+        mode_value = self._mode_combo.currentData() or "relative"
+        firmware_abs = self._firmware_abs_checkbox.isChecked()
+        return port, device, aspect, speed, mode_value, firmware_abs

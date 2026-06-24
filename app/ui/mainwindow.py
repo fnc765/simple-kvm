@@ -68,8 +68,26 @@ from core.keymap import (
     scancode_to_hid,
     vk_to_modifier,
 )
-from core.protocol import build_heartbeat, build_keyboard_report, build_mouse_report
+from core.protocol import (
+    build_heartbeat,
+    build_keyboard_report,
+    build_mouse_report,
+    build_mouse_abs_report,
+)
+from core.mouse_modes import (
+    MouseMode,
+    MouseModeConfig,
+    can_send_absolute,
+    should_hide_host_cursor,
+    should_warp_cursor,
+)
 from core.serial_comm import SerialComm
+from core.settings_values import (
+    read_mouse_mode_setting,
+    read_firmware_abs_setting,
+    write_mouse_mode_setting,
+    write_firmware_abs_setting,
+)
 from ui.settings_dialog import SettingsDialog
 
 
@@ -200,6 +218,16 @@ class MainWindow(QMainWindow):
         self._input_state   = InputState()
         self._warp_pending  = False          # True while cursor warp is in-flight
 
+        # Click that initiated KVM focus, in widget-local coordinates.
+        # Used by ``hybrid`` mode to compute the absolute jump target.
+        self._pending_kvm_activation_widget_pos: QPoint | None = None
+        # Last absolute HID coordinate sent (for duplicate suppression).
+        self._last_abs_x: int = -1
+        self._last_abs_y: int = -1
+        self._last_abs_buttons: int = -1
+        # Status-bar warning if firmware abs support is missing.
+        self._abs_fallback_warning: bool = False
+
         # ---- Fullscreen state ------------------------------------------------
         self._is_fullscreen = False
         self._pre_fullscreen_geometry = None   # QRect or None
@@ -230,6 +258,17 @@ class MainWindow(QMainWindow):
         self._connected      = False
         self._mouse_speed    = 1.0       # Mouse cursor speed multiplier (0.5x .. 2.0x)
         self._aspect_setting = "keep"    # aspect ratio mode for QSettings ("keep"/"fill")
+        self._mouse_mode            = read_mouse_mode_setting(self._settings)
+        self._firmware_abs_supported = read_firmware_abs_setting(self._settings)
+
+        # Effective mouse mode (resolves firmware-unsupported fall-back).
+        # Must be initialised *after* ``_mouse_mode`` /
+        # ``_firmware_abs_supported`` above.
+        self._mode_config: MouseModeConfig = MouseModeConfig(
+            mode=self._mouse_mode,
+            firmware_abs_supported=self._firmware_abs_supported,
+        )
+        self._effective_mode: MouseMode = self._mouse_mode
 
         # ---- Heartbeat timer ------------------------------------------------
         self._hb_timer = QTimer(self)
@@ -271,10 +310,12 @@ class MainWindow(QMainWindow):
             self._capture_device,
             current_aspect,
             self._mouse_speed,
+            self._mouse_mode.value,
+            self._firmware_abs_supported,
             self,
         )
         if dlg.exec():
-            port, device_name, aspect_mode, mouse_speed = dlg.get_values()
+            port, device_name, aspect_mode, mouse_speed, mouse_mode, firmware_abs = dlg.get_values()
             changed = False
             if port != self._port or device_name != self._capture_device:
                 self._port           = port
@@ -288,8 +329,26 @@ class MainWindow(QMainWindow):
                 self._video_widget.set_aspect_mode(new_mode)
             self._mouse_speed = mouse_speed
             self._aspect_setting = aspect_mode
+            new_mouse_mode = MouseMode(mouse_mode)
+            mode_changed = (
+                new_mouse_mode != self._mouse_mode
+                or bool(firmware_abs) != self._firmware_abs_supported
+            )
+            self._mouse_mode = new_mouse_mode
+            self._firmware_abs_supported = bool(firmware_abs)
+            self._refresh_effective_mode()
             if changed:
                 self._apply_settings()
+            elif mode_changed and self._kvm_active:
+                # The cursor behaviour may have changed mid-session;
+                # re-apply the per-mode cursor handling.
+                if should_hide_host_cursor(self._mode_config):
+                    self.setCursor(Qt.CursorShape.BlankCursor)
+                else:
+                    self.unsetCursor()
+                if should_warp_cursor(self._mode_config):
+                    self._recompute_center()
+                    QCursor.setPos(self._center)
             self._save_settings()
 
     def _apply_settings(self) -> None:
@@ -341,6 +400,10 @@ class MainWindow(QMainWindow):
         """Activate KVM mode after single-click confirmation (timer callback)."""
         if not self._kvm_active:
             self._set_kvm_active(True)
+            # In hybrid mode, perform a single absolute jump so the target
+            # cursor snaps to the position the user just clicked on.
+            if self._effective_mode is MouseMode.HYBRID and self._kvm_active:
+                self._send_hybrid_jump()
 
     def _send_heartbeat(self) -> None:
         if self._serial.isRunning():
@@ -355,15 +418,23 @@ class MainWindow(QMainWindow):
             return
         self._kvm_active = active
 
+        # Refresh the effective mouse mode (settings may have changed
+        # while KVM was inactive).  ``_effective_mode`` accounts for
+        # firmware support, so ``absolute`` / ``hybrid`` fall back to
+        # ``relative`` when the firmware does not advertise absolute HID.
+        self._refresh_effective_mode()
+
         if active:
             # Guard: do not touch menu bar when fullscreen (it's already hidden)
             if not self._is_fullscreen:
                 self.menuBar().setEnabled(False)
-            self.setCursor(Qt.CursorShape.BlankCursor)
-            self._recompute_center()
-            QCursor.setPos(self._center)
+            if should_hide_host_cursor(self._mode_config):
+                self.setCursor(Qt.CursorShape.BlankCursor)
+            if should_warp_cursor(self._mode_config):
+                self._recompute_center()
+                QCursor.setPos(self._center)
             self._status.showMessage(
-                f"{self._port} – KVM active (Esc to release)"
+                f"{self._port} – KVM active (Esc to release, mode: {self._effective_mode.value})"
             )
         else:
             # Guard: do not touch menu bar when fullscreen (managed by fullscreen exit)
@@ -375,6 +446,12 @@ class MainWindow(QMainWindow):
             modifier, keys = self._input_state.get_keyboard_report()
             self._serial.enqueue(build_keyboard_report(modifier, keys))
             self._serial.enqueue(build_mouse_report(0, 0, 0))
+            # Reset absolute duplicate suppression so a future activation
+            # always sends the first packet.
+            self._last_abs_x = -1
+            self._last_abs_y = -1
+            self._last_abs_buttons = -1
+            self._abs_fallback_warning = False
             if self._connected:
                 self._status.showMessage(f"Connected: {self._port}")
 
@@ -526,6 +603,9 @@ class MainWindow(QMainWindow):
                 and 0 <= local.y() < self._video_widget.height()
             )
             if in_widget:
+                # Remember where the user clicked so ``hybrid`` mode can
+                # jump the target cursor to the matching screen position.
+                self._pending_kvm_activation_widget_pos = local
                 self._kvm_click_timer.start(400)
             return
 
@@ -537,9 +617,12 @@ class MainWindow(QMainWindow):
         elif btn == Qt.MouseButton.MiddleButton:
             self._input_state.set_mouse_button(0x04, True)
 
-        self._serial.enqueue(
-            build_mouse_report(self._input_state.mouse_buttons, 0, 0)
-        )
+        if self._effective_mode is MouseMode.ABSOLUTE:
+            self._send_absolute_mouse()
+        else:
+            self._serial.enqueue(
+                build_mouse_report(self._input_state.mouse_buttons, 0, 0)
+            )
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if not self._kvm_active:
@@ -553,9 +636,12 @@ class MainWindow(QMainWindow):
         elif btn == Qt.MouseButton.MiddleButton:
             self._input_state.set_mouse_button(0x04, False)
 
-        self._serial.enqueue(
-            build_mouse_report(self._input_state.mouse_buttons, 0, 0)
-        )
+        if self._effective_mode is MouseMode.ABSOLUTE:
+            self._send_absolute_mouse()
+        else:
+            self._serial.enqueue(
+                build_mouse_report(self._input_state.mouse_buttons, 0, 0)
+            )
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         """Double-click on video widget toggles fullscreen."""
@@ -582,6 +668,14 @@ class MainWindow(QMainWindow):
             self._warp_pending = False
             return
 
+        if self._effective_mode is MouseMode.ABSOLUTE:
+            # In absolute mode the host cursor is the input source:
+            # no warp, no mouse-speed scaling.  Send an absolute packet
+            # for the current cursor position.
+            self._send_absolute_mouse()
+            return
+
+        # relative / hybrid -> existing behaviour
         # Recompute centre every move in case the window was repositioned
         self._recompute_center()
 
@@ -604,6 +698,119 @@ class MainWindow(QMainWindow):
             )
             self._warp_pending = True
             QCursor.setPos(self._center)
+
+    # -------------------------------------------------------------------------
+    # Mouse mode helpers
+    # -------------------------------------------------------------------------
+
+    def _refresh_effective_mode(self) -> None:
+        """Recompute the :class:`MouseModeConfig` from current settings.
+
+        When the user picked ``hybrid`` / ``absolute`` but the firmware
+        does not advertise absolute HID support, ``_effective_mode``
+        falls back to ``relative`` so the app keeps working and a
+        status-bar warning is shown.
+        """
+        self._mode_config = MouseModeConfig(
+            mode=self._mouse_mode,
+            firmware_abs_supported=self._firmware_abs_supported,
+        )
+        if not can_send_absolute(self._mode_config) and self._mouse_mode in (
+            MouseMode.HYBRID, MouseMode.ABSOLUTE,
+        ):
+            if self._kvm_active and not self._abs_fallback_warning:
+                self._status.showMessage(
+                    "Absolute HID firmware not enabled; "
+                    "falling back to relative input"
+                )
+                self._abs_fallback_warning = True
+            self._effective_mode = MouseMode.RELATIVE
+        else:
+            self._effective_mode = self._mouse_mode
+
+    def _current_mapping(self):
+        """Return the current :class:`VideoMapping` for the VideoWidget."""
+        from core.coordinates import (
+            Size2D,
+            compute_video_mapping,
+        )
+        source_pix = self._video_widget._pixmap
+        if source_pix is not None:
+            src_w = source_pix.width()
+            src_h = source_pix.height()
+        else:
+            # Fall back to the configured capture size.
+            from core.capture import DEFAULT_WIDTH, DEFAULT_HEIGHT
+            src_w, src_h = DEFAULT_WIDTH, DEFAULT_HEIGHT
+        return compute_video_mapping(
+            Size2D(src_w, src_h),
+            Size2D(self._video_widget.width(), self._video_widget.height()),
+            self._aspect_setting,
+        )
+
+    def _send_hybrid_jump(self) -> None:
+        """Send a single PKT_MOUSE_ABS at the KVM activation click.
+
+        Called by ``_activate_kvm_from_click`` in hybrid mode.
+        """
+        if not can_send_absolute(self._mode_config):
+            return
+        if self._pending_kvm_activation_widget_pos is None:
+            return
+        from core.coordinates import map_widget_point_to_hid
+        mapping = self._current_mapping()
+        local = self._pending_kvm_activation_widget_pos
+        mapped = map_widget_point_to_hid(
+            float(local.x()), float(local.y()), mapping
+        )
+        self._serial.enqueue(
+            build_mouse_abs_report(0, mapped.hid_x, mapped.hid_y)
+        )
+        # Update duplicate-suppression cache so subsequent moves don't
+        # re-send the same coordinate.
+        self._last_abs_x = mapped.hid_x
+        self._last_abs_y = mapped.hid_y
+        self._last_abs_buttons = 0
+
+    def _send_absolute_mouse(self) -> None:
+        """Send a PKT_MOUSE_ABS for the current host cursor position.
+
+        Coordinates outside the displayed video rect are clamped to
+        the nearest edge.  Duplicate packets (same x/y/buttons as the
+        previous one) are suppressed to avoid overflowing the serial
+        queue.
+        """
+        if not can_send_absolute(self._mode_config):
+            return
+        from core.coordinates import map_widget_point_to_hid
+        mapping = self._current_mapping()
+        # ``mapFromGlobal`` works in widget-local logical pixels.
+        try:
+            cursor_global = QCursor.pos()
+            local = self._video_widget.mapFromGlobal(cursor_global)
+        except Exception:
+            return
+        if not (
+            0 <= local.x() < self._video_widget.width()
+            and 0 <= local.y() < self._video_widget.height()
+        ):
+            return  # cursor not inside the VideoWidget
+        mapped = map_widget_point_to_hid(
+            float(local.x()), float(local.y()), mapping
+        )
+        buttons = self._input_state.mouse_buttons
+        if (
+            mapped.hid_x == self._last_abs_x
+            and mapped.hid_y == self._last_abs_y
+            and buttons == self._last_abs_buttons
+        ):
+            return
+        self._serial.enqueue(
+            build_mouse_abs_report(buttons, mapped.hid_x, mapped.hid_y)
+        )
+        self._last_abs_x = mapped.hid_x
+        self._last_abs_y = mapped.hid_y
+        self._last_abs_buttons = buttons
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
         if not self._kvm_active:
@@ -838,6 +1045,8 @@ class MainWindow(QMainWindow):
         self._settings.setValue(
             "input/mouse_speed", f"{self._mouse_speed:.1f}"
         )
+        write_mouse_mode_setting(self._settings, self._mouse_mode)
+        write_firmware_abs_setting(self._settings, self._firmware_abs_supported)
         self._settings.sync()
 
     def _load_settings(self) -> None:

@@ -109,7 +109,16 @@ python main.py
   - 全画面解除時に元のウィンドウサイズ・位置が完全に復元されます
 - **アスペクト比設定**: Settings ダイアログで「Maintain Aspect Ratio」（黒帯あり）と「Stretch to Fill」（画面全体に引き伸ばし）を切り替え可能
 - **マウスカーソル速度調整**: Settings ダイアログの「Mouse Speed」スライダーで、マウス移動速度を 0.5x 〜 2.0x の範囲で 0.1 刻みに調整できます
-- **設定の永続化**: COM ポート、キャプチャデバイス、アスペクト比、マウス速度の設定は自動的に保存され、次回起動時に復元されます。起動時に前回のデバイスが存在すれば自動接続されます
+- **マウスモード切替** (Phase 1〜2 ホスト側のみ): Settings ダイアログの「Mouse Mode」で以下を選択できます
+  - **Relative** (既定): 既存挙動。カーソルを画面中央へ固定し相対 dx/dy を送る
+  - **Hybrid**: KVM 開始時に VideoWidget 上のクリック座標へターゲットカーソルをジャンプさせた後、Relative と同じ動作
+  - **Absolute**: VideoWidget 内のホストカーソル位置をそのままターゲット PC の絶対座標として送信
+  - **「Firmware supports absolute HID」** チェックボックス: 旧ファームウェア (Phase 1〜2) ではオフのまま。Phase 3 firmware を書き込んだ BP2 を使うときだけオンにする
+- **設定の永続化**: COM ポート、キャプチャデバイス、アスペクト比、マウス速度、マウスモード、ファームウェア abs サポート設定は自動的に保存され、次回起動時に復元されます。起動時に前回のデバイスが存在すれば自動接続されます
+
+> **Note**: `Hybrid` / `Absolute` モードを使うには **Phase 3 firmware** が BP2 に書き込まれている必要があります。Phase 1〜2 の現行 firmware では「Firmware supports absolute HID」をオンにしないでください（unknown packet としてエラーブリンクします）。Phase 3 firmware は別 PR で提供予定です。
+
+> **SteamVR / OVR 対応**: `Absolute` モードは SteamVR Desktop dashboard (VR 内に Windows desktop を映す機能) での操作性を改善します。OVR Advanced Settings (OVRAS) の VR 内ダッシュボードオーバーレイは OpenVR overlay event 経路で動作するため、本プロジェクトの HID-only 範囲では完全対応しません。
 
 ---
 
@@ -119,8 +128,9 @@ python main.py
 [0xAA] [TYPE] [LEN] [PAYLOAD × LEN] [CRC-8-CCITT]
 CRC-8-CCITT = table-lookup over TYPE + LEN + PAYLOAD (polynomial 0x07, init 0x00)
 
-TYPE 0x01: Keyboard (LEN=8) – HID Boot Keyboard Report
-TYPE 0x02: Mouse    (LEN=5) – [buttons, dx, dy, wheel_v, wheel_h]
+TYPE 0x01: Keyboard  (LEN=8) – HID Boot Keyboard Report
+TYPE 0x02: Mouse     (LEN=5) – [buttons, dx, dy, wheel_v, wheel_h] (相対座標)
+TYPE 0x03: Mouse Abs (LEN=5) – [buttons, x_lo, x_hi, y_lo, y_hi] (絶対座標 0..32767、Phase 3 firmware 必須)
 TYPE 0xFF: Heartbeat (LEN=0)
 ```
 
