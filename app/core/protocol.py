@@ -9,7 +9,12 @@ Packet format:
 PKT_START     = 0xAA
 PKT_KEYBOARD  = 0x01
 PKT_MOUSE     = 0x02
+PKT_MOUSE_ABS = 0x03
 PKT_HEARTBEAT = 0xFF
+
+# Maximum value of the absolute coordinate in a HID absolute mouse report.
+# The host sends this as a uint16 little-endian in PKT_MOUSE_ABS.
+HID_ABS_MAX   = 32767
 
 # CRC-8-CCITT lookup table (polynomial 0x07, init 0x00)
 _CRC8_TABLE = [
@@ -120,3 +125,32 @@ def build_mouse_report(
 def build_heartbeat() -> bytes:
     """Build a PKT_HEARTBEAT packet (no payload)."""
     return _build_packet(PKT_HEARTBEAT, b"")
+
+
+def build_mouse_abs_report(buttons: int, x: int, y: int) -> bytes:
+    """
+    Build a PKT_MOUSE_ABS packet (HID absolute mouse report).
+
+    Args:
+        buttons: Button bitmask (bit0=Left, bit1=Right, bit2=Middle)
+        x:      Absolute X, clamped to [0, HID_ABS_MAX]
+        y:      Absolute Y, clamped to [0, HID_ABS_MAX]
+
+    Returns:
+        Framed 9-byte packet (3 header + 5 payload + 1 checksum).
+
+    Note:
+        Only valid with the Phase 3 firmware (3-interface HID composite
+        that exposes a Generic Desktop absolute mouse).  Sending this to
+        older firmware will cause an unknown-packet error blink.
+    """
+    x = max(0, min(HID_ABS_MAX, x))
+    y = max(0, min(HID_ABS_MAX, y))
+    payload = bytes([
+        buttons & 0x07,
+        x & 0xFF,         # x_lo
+        (x >> 8) & 0xFF,  # x_hi  (little-endian uint16)
+        y & 0xFF,         # y_lo
+        (y >> 8) & 0xFF,  # y_hi
+    ])
+    return _build_packet(PKT_MOUSE_ABS, payload)

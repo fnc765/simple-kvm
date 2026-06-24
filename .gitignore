@@ -33,3 +33,8 @@ Output/
 # PyInstaller work files
 *.pyz
 *.pkg
+
+# ChatGPT planning bridge (throwaway bundles / sessions; plans are tracked
+# under docs/ instead)
+.codex/chatgpt-bridge/bundles/
+.codex/chatgpt-bridge/sessions/
