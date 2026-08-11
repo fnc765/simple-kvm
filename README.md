@@ -93,6 +93,8 @@ python main.py
 4. **F11** キー / **View → Toggle Fullscreen** / 映像エリアの**ダブルクリック** で全画面表示に切り替えられます
    - 全画面中も Esc でフォーカス解除 → もう一度 Esc で全画面解除（2段階）
    - 全画面解除時に元のウィンドウサイズ・位置が復元されます
+5. ターゲットへ **Ctrl+Alt+Delete** を送る場合は、Esc でKVMフォーカスを解除してから **Input → Send Special Keys → Ctrl+Alt+Delete** を選択します
+   - この機能は既存のキーボードHIDレポートを使用するため、BluePillファームウェアの更新は不要です
 
 ---
 
@@ -109,6 +111,7 @@ python main.py
   - 全画面解除時に元のウィンドウサイズ・位置が完全に復元されます
 - **アスペクト比設定**: Settings ダイアログで「Maintain Aspect Ratio」（黒帯あり）と「Stretch to Fill」（画面全体に引き伸ばし）を切り替え可能
 - **マウスカーソル速度調整**: Settings ダイアログの「Mouse Speed」スライダーで、マウス移動速度を 0.5x 〜 2.0x の範囲で 0.1 刻みに調整できます
+- **特殊キー送信**: Input → Send Special Keys から Ctrl+Alt+Delete をターゲットへ送信できます。押下・解放は1つの送信シーケンスとして処理されます
 - **マウスモード切替** (Phase 1〜2 ホスト側のみ): Settings ダイアログの「Mouse Mode」で以下を選択できます
   - **Relative** (既定): 既存挙動。カーソルを画面中央へ固定し相対 dx/dy を送る
   - **Hybrid**: KVM 開始時に VideoWidget 上のクリック座標へターゲットカーソルをジャンプさせた後、Relative と同じ動作
