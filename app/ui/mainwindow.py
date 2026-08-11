@@ -82,6 +82,7 @@ from core.mouse_modes import (
     should_warp_cursor,
 )
 from core.serial_comm import SerialComm
+from core.special_keys import SPECIAL_KEY_PRESETS, SpecialKeyPreset
 from core.settings_values import (
     read_mouse_mode_setting,
     read_firmware_abs_setting,
@@ -147,13 +148,21 @@ class MainWindow(QMainWindow):
 
     _HEARTBEAT_INTERVAL_MS = 1_000
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        settings: QSettings | None = None,
+        auto_connect: bool = True,
+    ) -> None:
         super().__init__()
         self.setWindowTitle("simple-kvm")
 
         # ---- Persistent settings ----------------------------------------------
-        QSettings.setDefaultFormat(QSettings.Format.NativeFormat)
-        self._settings = QSettings(ORGANIZATION, APP_NAME)
+        if settings is None:
+            QSettings.setDefaultFormat(QSettings.Format.NativeFormat)
+            self._settings = QSettings(ORGANIZATION, APP_NAME)
+        else:
+            self._settings = settings
 
         # ---- Video widget ---------------------------------------------------
         self._video_widget = VideoWidget(self)
@@ -211,6 +220,19 @@ class MainWindow(QMainWindow):
         menu_bar.addMenu(view_menu)
         fullscreen_action = view_menu.addAction("Toggle Fullscreen\tF11")
         fullscreen_action.triggered.connect(self.toggle_fullscreen)
+
+        input_menu = QMenu("Input", self)
+        menu_bar.addMenu(input_menu)
+        special_keys_menu = input_menu.addMenu("Send Special Keys")
+        self._special_key_actions = {}
+        for preset in SPECIAL_KEY_PRESETS:
+            action = special_keys_menu.addAction(preset.label)
+            action.setEnabled(False)
+            action.triggered.connect(
+                lambda _checked=False, selected=preset:
+                    self._send_special_key(selected)
+            )
+            self._special_key_actions[preset.id] = action
 
         # ---- Input / KVM state ----------------------------------------------
         self._kvm_active    = False
@@ -286,7 +308,8 @@ class MainWindow(QMainWindow):
 
         # ---- Load saved settings and try auto-connect -----------------------
         self._load_settings()
-        self._try_auto_connect()
+        if auto_connect:
+            self._try_auto_connect()
 
     # -------------------------------------------------------------------------
     # Show event – initialise Raw Input once the native window exists
@@ -372,6 +395,8 @@ class MainWindow(QMainWindow):
 
     def _on_serial_connected(self, connected: bool) -> None:
         self._connected = connected
+        for action in self._special_key_actions.values():
+            action.setEnabled(connected)
         if connected:
             self._status.showMessage(f"Connected: {self._port}")
         else:
@@ -408,6 +433,21 @@ class MainWindow(QMainWindow):
     def _send_heartbeat(self) -> None:
         if self._serial.isRunning():
             self._serial.enqueue(build_heartbeat())
+
+    def _send_special_key(self, preset: SpecialKeyPreset) -> None:
+        """Queue a predefined keyboard chord without changing live input state."""
+        if not self._connected:
+            self._status.showMessage(
+                f"Special keys not sent: disconnected ({preset.label})"
+            )
+            return
+
+        if self._serial.enqueue_sequence(preset.build_sequence()):
+            self._status.showMessage(f"Sent special keys: {preset.label}")
+        else:
+            self._status.showMessage(
+                f"Special keys not sent: send queue full ({preset.label})"
+            )
 
     # -------------------------------------------------------------------------
     # Focus / KVM active mode

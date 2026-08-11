@@ -9,11 +9,66 @@ from __future__ import annotations
 
 import queue
 import re
+import time
+from dataclasses import dataclass
 
 import serial
 from PySide6.QtCore import QThread, Signal
 
 _COM_PORT_RE = re.compile(r'^COM\d{1,3}$', re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class PacketStep:
+    """One packet in an atomic sequence, followed by an optional delay."""
+
+    data: bytes
+    delay_after_ms: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.data, bytes) or not self.data:
+            raise ValueError("packet data must be non-empty bytes")
+        if self.delay_after_ms < 0:
+            raise ValueError("packet delay cannot be negative")
+
+
+@dataclass(frozen=True)
+class PacketSequence:
+    """Packets admitted to the send queue as one indivisible item."""
+
+    steps: tuple[PacketStep, ...]
+    cleanup_data: bytes | None = None
+
+    def __post_init__(self) -> None:
+        if not self.steps:
+            raise ValueError("packet sequence must contain at least one step")
+        if self.cleanup_data is not None and (
+            not isinstance(self.cleanup_data, bytes) or not self.cleanup_data
+        ):
+            raise ValueError("sequence cleanup data must be non-empty bytes")
+
+
+QueueItem = bytes | PacketSequence
+
+
+def _write_queue_item(ser, item: QueueItem, sleeper=time.sleep) -> None:
+    """Write a normal packet or a complete atomic sequence to *ser*."""
+    if isinstance(item, bytes):
+        ser.write(item)
+        return
+
+    try:
+        for step in item.steps:
+            ser.write(step.data)
+            if step.delay_after_ms:
+                sleeper(step.delay_after_ms / 1_000)
+    except Exception:
+        if item.cleanup_data is not None:
+            try:
+                ser.write(item.cleanup_data)
+            except Exception:
+                pass
+        raise
 
 
 class SerialComm(QThread):
@@ -34,7 +89,7 @@ class SerialComm(QThread):
         super().__init__(parent)
         self._port    = ""
         self._baud    = 115_200
-        self._queue: queue.Queue[bytes] = queue.Queue(maxsize=64)
+        self._queue: queue.Queue[QueueItem] = queue.Queue(maxsize=64)
 
     # ------------------------------------------------------------------
     # Public API
@@ -59,10 +114,18 @@ class SerialComm(QThread):
         except queue.Full:
             return False
 
+    def enqueue_sequence(self, sequence: PacketSequence) -> bool:
+        """Atomically queue all steps in *sequence* as a single item."""
+        try:
+            self._queue.put_nowait(sequence)
+            return True
+        except queue.Full:
+            return False
+
     def stop(self) -> None:
         """Request shutdown and wait for the thread to finish."""
         self.requestInterruption()
-        self.wait(3_000)
+        self.wait(5_000)
 
     # ------------------------------------------------------------------
     # QThread entry point
@@ -78,8 +141,8 @@ class SerialComm(QThread):
 
                 while not self.isInterruptionRequested():
                     try:
-                        data = self._queue.get(timeout=self._SEND_TIMEOUT)
-                        ser.write(data)
+                        item = self._queue.get(timeout=self._SEND_TIMEOUT)
+                        _write_queue_item(ser, item)
                     except queue.Empty:
                         pass  # nothing to send; loop back
                     except serial.SerialTimeoutException:
