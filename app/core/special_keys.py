@@ -51,4 +51,70 @@ CTRL_ALT_DELETE = SpecialKeyPreset(
     keys=(0x4C,),
 )
 
-SPECIAL_KEY_PRESETS = (CTRL_ALT_DELETE,)
+CTRL_SHIFT_ESCAPE = SpecialKeyPreset(
+    id="ctrl_shift_escape",
+    label="Ctrl+Shift+Esc",
+    modifier=0x01 | 0x02,
+    keys=(0x29,),
+)
+
+ALT_F4 = SpecialKeyPreset(
+    id="alt_f4",
+    label="Alt+F4",
+    modifier=0x04,
+    keys=(0x3D,),
+)
+
+WIN_L = SpecialKeyPreset(
+    id="win_l",
+    label="Win+L",
+    modifier=0x08,
+    keys=(0x0F,),
+)
+
+WIN_R = SpecialKeyPreset(
+    id="win_r",
+    label="Win+R",
+    modifier=0x08,
+    keys=(0x15,),
+)
+
+COMMAND_OPTION_ESCAPE = SpecialKeyPreset(
+    id="command_option_escape",
+    label="Command+Option+Esc",
+    modifier=0x08 | 0x04,
+    keys=(0x29,),
+)
+
+BIOS_DELETE = SpecialKeyPreset(
+    id="delete",
+    label="Delete",
+    modifier=0x00,
+    keys=(0x4C,),
+)
+
+BIOS_F2 = SpecialKeyPreset(
+    id="f2",
+    label="F2",
+    modifier=0x00,
+    keys=(0x3B,),
+)
+
+BIOS_F12 = SpecialKeyPreset(
+    id="f12",
+    label="F12",
+    modifier=0x00,
+    keys=(0x45,),
+)
+
+SPECIAL_KEY_PRESETS = (
+    CTRL_ALT_DELETE,
+    CTRL_SHIFT_ESCAPE,
+    ALT_F4,
+    WIN_L,
+    WIN_R,
+    COMMAND_OPTION_ESCAPE,
+    BIOS_DELETE,
+    BIOS_F2,
+    BIOS_F12,
+)
