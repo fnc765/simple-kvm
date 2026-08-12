@@ -3,6 +3,7 @@
 import os
 import queue
 import sys
+from threading import Event
 
 import pytest
 import serial
@@ -96,6 +97,31 @@ def test_sequence_attempts_cleanup_after_a_mid_sequence_timeout():
         _write_queue_item(fake, sequence, sleeper=lambda _seconds: None)
 
     assert fake.writes == [b"press", b"release"]
+
+
+def test_cancelled_sequence_stops_and_sends_cleanup():
+    fake = FakeSerial()
+    cancel = Event()
+    sleeps = []
+
+    def cancel_after_first_step(seconds):
+        sleeps.append(seconds)
+        cancel.set()
+
+    sequence = PacketSequence(
+        (
+            PacketStep(b"press", 10),
+            PacketStep(b"release", 10),
+            PacketStep(b"next", 0),
+        ),
+        cleanup_data=b"cleanup",
+        cancel_event=cancel,
+    )
+
+    _write_queue_item(fake, sequence, sleeper=cancel_after_first_step)
+
+    assert sleeps == [0.010]
+    assert fake.writes == [b"press", b"cleanup"]
 
 
 def test_stop_wait_budget_covers_a_complete_three_write_sequence():

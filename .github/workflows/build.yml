@@ -9,6 +9,7 @@ on:
       - 'simple-kvm.spec'
       - 'installer.iss'
       - 'installer_resources/**'
+      - 'THIRD_PARTY_NOTICES.md'
       - 'pyproject.toml'
       - '.github/workflows/build.yml'
   workflow_dispatch:
@@ -43,6 +44,7 @@ jobs:
           python -c "import PySide6.QtCore; print('QtCore OK')"
           python -c "import av; print('av', av.__version__)"
           python -c "import serial; print('pyserial', serial.__version__)"
+          python -c "import pykakasi; print('pykakasi OK')"
 
       - name: Security audit
         run: |
@@ -123,6 +125,14 @@ jobs:
             throw "FFmpeg DLLs still missing after manual copy!"
           }
           Write-Host "FFmpeg DLLs: $($ffmpegDlls.Count) files"
+          if (-not (Test-Path "dist/simple-kvm/_internal/THIRD_PARTY_NOTICES.md")) {
+            throw "Third-party notices are missing from the build output"
+          }
+          $pykakasiLicenses = @(Get-ChildItem "dist/simple-kvm/_internal/pykakasi-*.dist-info/COPYING" -ErrorAction SilentlyContinue)
+          if ($pykakasiLicenses.Count -eq 0) {
+            throw "pykakasi license is missing from the build output"
+          }
+          Write-Host "pykakasi license: $($pykakasiLicenses[0].FullName)"
           $size = [math]::Round(((Get-ChildItem -Recurse -File dist/simple-kvm/ | Measure-Object -Property Length -Sum).Sum)/1MB, 1)
           Write-Host "Total size: $size MB"
 

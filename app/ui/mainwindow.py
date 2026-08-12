@@ -29,6 +29,7 @@ from __future__ import annotations
 import ctypes
 import time
 from ctypes import wintypes
+from threading import Event
 
 from PySide6.QtCore import QPoint, QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import (
@@ -59,6 +60,16 @@ from core.capture import (
     APP_NAME,
     list_dshow_devices,
 )
+from core.amical_bridge import (
+    AMICAL_F9_SCANCODE,
+    AMICAL_F9_VK,
+    DEFAULT_PASTE_TIMEOUT_SECONDS,
+    INJECTED_CONTROL_VK,
+    INJECTED_V_VK,
+    AmicalPasteGate,
+    build_ascii_typing_sequence,
+    romanize_for_hid,
+)
 from core.input_hook import InputState, RawInputHook
 from core.keymap import (
     get_modifier_bit,
@@ -84,8 +95,10 @@ from core.mouse_modes import (
 from core.serial_comm import SerialComm
 from core.special_keys import SPECIAL_KEY_PRESETS, SpecialKeyPreset
 from core.settings_values import (
+    read_amical_romaji_enabled_setting,
     read_mouse_mode_setting,
     read_firmware_abs_setting,
+    write_amical_romaji_enabled_setting,
     write_mouse_mode_setting,
     write_firmware_abs_setting,
 )
@@ -164,6 +177,14 @@ class MainWindow(QMainWindow):
         else:
             self._settings = settings
 
+        # ---- Amical host-side bridge ---------------------------------------
+        self._amical_enabled = read_amical_romaji_enabled_setting(
+            self._settings
+        )
+        self._amical_gate = AmicalPasteGate()
+        self._amical_injected_chord_active = False
+        self._amical_send_cancel: Event | None = None
+
         # ---- Video widget ---------------------------------------------------
         self._video_widget = VideoWidget(self)
         self.setCentralWidget(self._video_widget)
@@ -223,6 +244,17 @@ class MainWindow(QMainWindow):
 
         input_menu = QMenu("Input", self)
         menu_bar.addMenu(input_menu)
+        self._amical_enabled_action = input_menu.addAction(
+            "Amical Romaji Forwarding"
+        )
+        self._amical_enabled_action.setCheckable(True)
+        self._amical_enabled_action.setChecked(self._amical_enabled)
+        self._amical_enabled_action.setToolTip(
+            "Reserve F9 for Amical, convert the pasted transcript to ASCII "
+            "romaji, and type it on the target without pressing Enter."
+        )
+        self._amical_enabled_action.toggled.connect(self._set_amical_enabled)
+        input_menu.addSeparator()
         special_keys_menu = input_menu.addMenu("Send Special Keys")
         self._special_key_actions = {}
         for preset in SPECIAL_KEY_PRESETS:
@@ -260,6 +292,10 @@ class MainWindow(QMainWindow):
         self._kvm_click_timer = QTimer(self)
         self._kvm_click_timer.setSingleShot(True)
         self._kvm_click_timer.timeout.connect(self._activate_kvm_from_click)
+
+        self._amical_wait_timer = QTimer(self)
+        self._amical_wait_timer.setSingleShot(True)
+        self._amical_wait_timer.timeout.connect(self._expire_amical_wait)
 
         # ---- Raw Input (Windows) --------------------------------------------
         self._raw_hook: RawInputHook | None = None
@@ -400,6 +436,9 @@ class MainWindow(QMainWindow):
         if connected:
             self._status.showMessage(f"Connected: {self._port}")
         else:
+            if self._amical_send_cancel is not None:
+                self._amical_send_cancel.set()
+                self._amical_send_cancel = None
             self._status.showMessage("Disconnected")
 
     def _on_frame_ready(self, image: QImage) -> None:
@@ -449,6 +488,140 @@ class MainWindow(QMainWindow):
                 f"Special keys not sent: send queue full ({preset.label})"
             )
 
+    def _set_amical_enabled(self, enabled: bool) -> None:
+        """Enable or disable opt-in F9-to-romaji forwarding."""
+        self._amical_enabled = bool(enabled)
+        self._reset_amical_flow(cancel_typing=True)
+        state = "enabled" if enabled else "disabled"
+        self._status.showMessage(
+            f"Amical romaji forwarding {state}; F9 is "
+            f"{'reserved' if enabled else 'forwarded normally'}"
+        )
+
+    def _reset_amical_flow(self, *, cancel_typing: bool) -> None:
+        self._amical_gate.reset()
+        self._amical_wait_timer.stop()
+        self._amical_injected_chord_active = False
+        if cancel_typing and self._amical_send_cancel is not None:
+            self._amical_send_cancel.set()
+            self._amical_send_cancel = None
+
+    def _begin_amical_f9(self) -> None:
+        if not self._amical_gate.on_f9_down():
+            return
+        if self._amical_send_cancel is not None:
+            self._amical_send_cancel.set()
+            self._amical_send_cancel = None
+        self._amical_wait_timer.stop()
+        self._status.showMessage(
+            "Amical recording active (F9 reserved; release to transcribe)"
+        )
+
+    def _finish_amical_f9(self) -> None:
+        if not self._amical_gate.on_f9_up():
+            return
+        self._amical_wait_timer.start(
+            int(DEFAULT_PASTE_TIMEOUT_SECONDS * 1_000)
+        )
+        self._status.showMessage("Waiting for Amical transcript paste…")
+
+    def _expire_amical_wait(self) -> None:
+        self._amical_gate.reset()
+        self._amical_injected_chord_active = False
+        self._status.showMessage("Amical transcript was not received in time")
+
+    def _handle_amical_key_press(self, event: QKeyEvent) -> bool:
+        """Consume Amical's injected Ctrl+V and queue its clipboard text."""
+        if not self._amical_enabled or not self._kvm_active:
+            return False
+        if event.nativeScanCode() != 0:
+            return False
+
+        native_vk = event.nativeVirtualKey()
+        waiting = self._amical_gate.is_waiting()
+        if native_vk == INJECTED_CONTROL_VK and waiting:
+            self._amical_injected_chord_active = True
+            return True
+
+        is_ctrl_v = (
+            native_vk == INJECTED_V_VK
+            and event.key() == Qt.Key.Key_V
+            and bool(
+                event.modifiers()
+                & Qt.KeyboardModifier.ControlModifier
+            )
+        )
+        if not is_ctrl_v or not (
+            waiting or self._amical_injected_chord_active
+        ):
+            return False
+
+        self._amical_injected_chord_active = True
+        if not self._amical_gate.consume():
+            return True
+
+        self._amical_wait_timer.stop()
+        source = QApplication.clipboard().text()
+        try:
+            result = romanize_for_hid(source)
+        except Exception as exc:
+            self._status.showMessage(
+                f"Amical romaji conversion failed: {type(exc).__name__}"
+            )
+            return True
+        if not result.text:
+            self._status.showMessage(
+                "Amical transcript contained no sendable letters or digits"
+            )
+            return True
+        if not self._connected:
+            self._status.showMessage(
+                "Amical transcript captured, but KVM serial is disconnected"
+            )
+            return True
+
+        if self._amical_send_cancel is not None:
+            self._amical_send_cancel.set()
+        cancel_event = Event()
+        self._amical_send_cancel = cancel_event
+        sequence = build_ascii_typing_sequence(
+            result.text,
+            cancel_event=cancel_event,
+        )
+        if not self._serial.enqueue_sequence(sequence):
+            cancel_event.set()
+            self._amical_send_cancel = None
+            self._status.showMessage(
+                "Amical romaji not sent: serial send queue is full"
+            )
+            return True
+
+        preview = result.text[:64]
+        if len(result.text) > len(preview):
+            preview += "…"
+        suffix = " (truncated)" if result.truncated else ""
+        self._status.showMessage(
+            f"Queued Amical romaji: {preview!r}{suffix}"
+        )
+        return True
+
+    def _handle_amical_key_release(self, event: QKeyEvent) -> bool:
+        if (
+            not self._amical_enabled
+            or not self._kvm_active
+            or not self._amical_injected_chord_active
+            or event.nativeScanCode() != 0
+        ):
+            return False
+        if event.nativeVirtualKey() not in {
+            INJECTED_CONTROL_VK,
+            INJECTED_V_VK,
+        }:
+            return False
+        if event.nativeVirtualKey() == INJECTED_CONTROL_VK:
+            self._amical_injected_chord_active = False
+        return True
+
     # -------------------------------------------------------------------------
     # Focus / KVM active mode
     # -------------------------------------------------------------------------
@@ -473,10 +646,13 @@ class MainWindow(QMainWindow):
             if should_warp_cursor(self._mode_config):
                 self._recompute_center()
                 QCursor.setPos(self._center)
+            amical_part = ", Amical F9 reserved" if self._amical_enabled else ""
             self._status.showMessage(
-                f"{self._port} – KVM active (Esc to release, mode: {self._effective_mode.value})"
+                f"{self._port} – KVM active (Esc to release, "
+                f"mode: {self._effective_mode.value}{amical_part})"
             )
         else:
+            self._reset_amical_flow(cancel_typing=True)
             # Guard: do not touch menu bar when fullscreen (managed by fullscreen exit)
             if not self._is_fullscreen:
                 self.menuBar().setEnabled(True)
@@ -871,6 +1047,20 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------------
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        # Amical's Windows helper injects a scan-code-zero Ctrl+V after F9.
+        # Capture it before the Raw Input duplicate-suppression return below.
+        if self._handle_amical_key_press(event):
+            return
+
+        if (
+            self._amical_enabled
+            and self._kvm_active
+            and not self._use_raw_input
+            and event.key() == Qt.Key.Key_F9
+        ):
+            self._begin_amical_f9()
+            return
+
         # --- Priority 1: Escape handling ---
         if event.key() == Qt.Key.Key_Escape:
             if self._esc_suppressed:
@@ -916,6 +1106,19 @@ class MainWindow(QMainWindow):
             self._serial.enqueue(build_keyboard_report(modifier, keys))
 
     def keyReleaseEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        if self._handle_amical_key_release(event):
+            return
+
+        if (
+            self._amical_enabled
+            and self._kvm_active
+            and not self._use_raw_input
+            and event.key() == Qt.Key.Key_F9
+        ):
+            if not event.isAutoRepeat():
+                self._finish_amical_f9()
+            return
+
         # When Raw Input is active, skip Qt keyboard events.
         if self._use_raw_input and self._kvm_active:
             return
@@ -988,6 +1191,14 @@ class MainWindow(QMainWindow):
         if not self._kvm_active:
             return
 
+        if (
+            self._amical_enabled
+            and scancode == AMICAL_F9_SCANCODE
+            and vk == AMICAL_F9_VK
+        ):
+            self._begin_amical_f9()
+            return
+
         # Escape handling with fullscreen awareness
         if scancode == 0x01:  # Esc
             if self._is_fullscreen:
@@ -1028,6 +1239,13 @@ class MainWindow(QMainWindow):
                        is_e0: bool) -> None:
         """Raw Input keyboard release callback."""
         if not self._kvm_active:
+            return
+        if (
+            self._amical_enabled
+            and scancode == AMICAL_F9_SCANCODE
+            and vk == AMICAL_F9_VK
+        ):
+            self._finish_amical_f9()
             return
         changed = False
         mod_bit = vk_to_modifier(vk, scancode, is_e0)
@@ -1076,6 +1294,7 @@ class MainWindow(QMainWindow):
     #   capture/device     : str   – last-used DirectShow device friendly name
     #   video/aspect       : str   – "keep" or "fill"
     #   input/mouse_speed  : str   – speed multiplier as string (e.g. "1.0")
+    #   input/amical_romaji_enabled : bool – reserve F9 for Amical bridge
 
     def _save_settings(self) -> None:
         """Write current settings to persistent storage."""
@@ -1087,6 +1306,10 @@ class MainWindow(QMainWindow):
         )
         write_mouse_mode_setting(self._settings, self._mouse_mode)
         write_firmware_abs_setting(self._settings, self._firmware_abs_supported)
+        write_amical_romaji_enabled_setting(
+            self._settings,
+            self._amical_enabled,
+        )
         self._settings.sync()
 
     def _load_settings(self) -> None:

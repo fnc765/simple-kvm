@@ -100,4 +100,6 @@ git push origin v0.1.0
 - [ ] スタートメニュー・デスクトップショートカットから起動できること
 - [ ] アプリが正常に起動し、メインウィンドウが表示されること
 - [ ] アンインストーラーが正常動作すること
+- [ ] `THIRD_PARTY_NOTICES.md`と`pykakasi-*.dist-info/COPYING`が配布物に含まれること
+- [ ] Amical Romaji Forwardingで日本語がローマ字としてターゲットへ入力されること
 - [ ] [VirusTotal](https://www.virustotal.com) で誤検知チェック

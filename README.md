@@ -41,6 +41,7 @@ simple-kvm/
 │   ├── main.py             # エントリポイント
 │   ├── requirements.txt
 │   ├── core/
+│   │   ├── amical_bridge.py # Amical音声入力→ローマ字HID変換
 │   │   ├── capture.py      # OpenCV キャプチャスレッド
 │   │   ├── input_hook.py   # 入力状態管理
 │   │   ├── keymap.py       # Qt.Key → HID Usage ID 変換
@@ -95,6 +96,9 @@ python main.py
    - 全画面解除時に元のウィンドウサイズ・位置が復元されます
 5. ターゲットへ **Ctrl+Alt+Delete** を送る場合は、Esc でKVMフォーカスを解除してから **Input → Send Special Keys → Ctrl+Alt+Delete** を選択します
    - この機能は既存のキーボードHIDレポートを使用するため、BluePillファームウェアの更新は不要です
+6. Amical音声入力を転送する場合は **Input → Amical Romaji Forwarding** をオンにします
+   - KVMフォーカス中にF9を押して話し、離すと、日本語の文字起こしがローマ字としてターゲットへ入力されます
+   - Enterは自動送信されません。内容を確認して手動で送信してください
 
 ---
 
@@ -112,6 +116,8 @@ python main.py
 - **アスペクト比設定**: Settings ダイアログで「Maintain Aspect Ratio」（黒帯あり）と「Stretch to Fill」（画面全体に引き伸ばし）を切り替え可能
 - **マウスカーソル速度調整**: Settings ダイアログの「Mouse Speed」スライダーで、マウス移動速度を 0.5x 〜 2.0x の範囲で 0.1 刻みに調整できます
 - **特殊キー送信**: Input → Send Special Keys から Ctrl+Alt+Delete をターゲットへ送信できます。押下・解放は1つの送信シーケンスとして処理されます
+- **Amicalローマ字転送**: AmicalのF9音声入力結果をホスト側でローマ字化し、英数字とスペースのHIDキー入力としてターゲットへ送信します。ターゲット側の受信ソフトやIMEは不要です
+  - F9を離してから15秒以内に届いたAmicalの貼り付けを処理し、1回につき最大1,000文字を送信します
 - **マウスモード切替** (Phase 1〜2 ホスト側のみ): Settings ダイアログの「Mouse Mode」で以下を選択できます
   - **Relative** (既定): 既存挙動。カーソルを画面中央へ固定し相対 dx/dy を送る
   - **Hybrid**: KVM 開始時に VideoWidget 上のクリック座標へターゲットカーソルをジャンプさせた後、Relative と同じ動作
@@ -143,7 +149,7 @@ TYPE 0xFF: Heartbeat (LEN=0)
 
 ## ライセンス
 
-MIT License
+本プロジェクトのコードはMIT Licenseです。Amicalローマ字転送ではGPL-3.0-or-laterの`pykakasi`を利用します。配布物に含まれる第三者ソフトウェアについては[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)を参照してください。
 
 ---
 

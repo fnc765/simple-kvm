@@ -11,6 +11,8 @@ import queue
 import re
 import time
 from dataclasses import dataclass
+from threading import Event
+from typing import Callable
 
 import serial
 from PySide6.QtCore import QThread, Signal
@@ -38,6 +40,7 @@ class PacketSequence:
 
     steps: tuple[PacketStep, ...]
     cleanup_data: bytes | None = None
+    cancel_event: Event | None = None
 
     def __post_init__(self) -> None:
         if not self.steps:
@@ -51,7 +54,21 @@ class PacketSequence:
 QueueItem = bytes | PacketSequence
 
 
-def _write_queue_item(ser, item: QueueItem, sleeper=time.sleep) -> None:
+def _write_cleanup(ser, item: PacketSequence) -> None:
+    if item.cleanup_data is None:
+        return
+    try:
+        ser.write(item.cleanup_data)
+    except Exception:
+        pass
+
+
+def _write_queue_item(
+    ser,
+    item: QueueItem,
+    sleeper=time.sleep,
+    should_stop: Callable[[], bool] | None = None,
+) -> None:
     """Write a normal packet or a complete atomic sequence to *ser*."""
     if isinstance(item, bytes):
         ser.write(item)
@@ -59,15 +76,17 @@ def _write_queue_item(ser, item: QueueItem, sleeper=time.sleep) -> None:
 
     try:
         for step in item.steps:
+            if (should_stop is not None and should_stop()) or (
+                item.cancel_event is not None
+                and item.cancel_event.is_set()
+            ):
+                _write_cleanup(ser, item)
+                return
             ser.write(step.data)
             if step.delay_after_ms:
                 sleeper(step.delay_after_ms / 1_000)
     except Exception:
-        if item.cleanup_data is not None:
-            try:
-                ser.write(item.cleanup_data)
-            except Exception:
-                pass
+        _write_cleanup(ser, item)
         raise
 
 
@@ -142,7 +161,11 @@ class SerialComm(QThread):
                 while not self.isInterruptionRequested():
                     try:
                         item = self._queue.get(timeout=self._SEND_TIMEOUT)
-                        _write_queue_item(ser, item)
+                        _write_queue_item(
+                            ser,
+                            item,
+                            should_stop=self.isInterruptionRequested,
+                        )
                     except queue.Empty:
                         pass  # nothing to send; loop back
                     except serial.SerialTimeoutException:
