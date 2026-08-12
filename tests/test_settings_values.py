@@ -7,12 +7,16 @@ from core.mouse_modes import MouseMode
 from core.settings_values import (
     DEFAULT_MOUSE_MODE,
     DEFAULT_FIRMWARE_ABS_SUPPORTED,
+    DEFAULT_AMICAL_ROMAJI_ENABLED,
     MOUSE_MODE_KEY,
     FIRMWARE_ABS_KEY,
+    AMICAL_ROMAJI_ENABLED_KEY,
+    read_amical_romaji_enabled_setting,
     read_mouse_mode_setting,
     read_firmware_abs_setting,
     write_mouse_mode_setting,
     write_firmware_abs_setting,
+    write_amical_romaji_enabled_setting,
     parse_bool_setting,
 )
 
@@ -25,12 +29,14 @@ def test_defaults_are_safe():
     """Defaults must preserve pre-existing behaviour."""
     assert DEFAULT_MOUSE_MODE is MouseMode.RELATIVE
     assert DEFAULT_FIRMWARE_ABS_SUPPORTED is False
+    assert DEFAULT_AMICAL_ROMAJI_ENABLED is False
 
 
 def test_setting_keys_are_namespaced():
     """Setting keys live under input/ to match existing convention."""
     assert MOUSE_MODE_KEY.startswith("input/")
     assert FIRMWARE_ABS_KEY.startswith("input/")
+    assert AMICAL_ROMAJI_ENABLED_KEY.startswith("input/")
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +124,19 @@ def test_write_and_read_firmware_abs_roundtrip():
     write_firmware_abs_setting(s, False)
     assert s._data[FIRMWARE_ABS_KEY] == "false"
     assert read_firmware_abs_setting(s) is False
+
+
+def test_write_and_read_amical_romaji_enabled_roundtrip():
+    s = _DictSettings()
+    assert read_amical_romaji_enabled_setting(s) is False
+
+    write_amical_romaji_enabled_setting(s, True)
+    assert s._data[AMICAL_ROMAJI_ENABLED_KEY] == "true"
+    assert read_amical_romaji_enabled_setting(s) is True
+
+    write_amical_romaji_enabled_setting(s, False)
+    assert s._data[AMICAL_ROMAJI_ENABLED_KEY] == "false"
+    assert read_amical_romaji_enabled_setting(s) is False
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,5 @@
 """
-settings_values.py – Pure persistence helpers for the mouse mode
-configuration (mouse_mode + firmware_abs_supported).
+settings_values.py – Pure persistence helpers for application input settings.
 
 This module is Qt-free so the read/write/parse logic can be unit-tested
 without spinning up a QApplication or a QSettings backend.  Callers
@@ -26,9 +25,11 @@ from .mouse_modes import MouseMode, normalize_mouse_mode
 
 MOUSE_MODE_KEY: str = "input/mouse_mode"
 FIRMWARE_ABS_KEY: str = "input/firmware_abs_supported"
+AMICAL_ROMAJI_ENABLED_KEY: str = "input/amical_romaji_enabled"
 
 DEFAULT_MOUSE_MODE: MouseMode = MouseMode.RELATIVE
 DEFAULT_FIRMWARE_ABS_SUPPORTED: bool = False
+DEFAULT_AMICAL_ROMAJI_ENABLED: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -78,3 +79,22 @@ def read_firmware_abs_setting(settings: Any) -> bool:
 def write_firmware_abs_setting(settings: Any, supported: bool) -> None:
     """Persist the firmware-abs-supported flag."""
     settings.setValue(FIRMWARE_ABS_KEY, "true" if supported else "false")
+
+
+# ---------------------------------------------------------------------------
+# Amical Romaji Forwarding
+# ---------------------------------------------------------------------------
+
+
+def read_amical_romaji_enabled_setting(settings: Any) -> bool:
+    """Return whether the opt-in Amical forwarding feature is enabled."""
+    raw = settings.value(AMICAL_ROMAJI_ENABLED_KEY, "false")
+    return parse_bool_setting(raw)
+
+
+def write_amical_romaji_enabled_setting(settings: Any, enabled: bool) -> None:
+    """Persist the Amical forwarding feature flag."""
+    settings.setValue(
+        AMICAL_ROMAJI_ENABLED_KEY,
+        "true" if enabled else "false",
+    )

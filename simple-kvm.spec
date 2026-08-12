@@ -8,6 +8,11 @@ Minimal spec -- PyInstaller's built-in hooks handle most dependencies.
 CI uses a post-build step to copy PySide6 plugins/av.libs if needed.
 """
 
+from PyInstaller.utils.hooks import collect_data_files, copy_metadata
+
+_pykakasi_datas = collect_data_files('pykakasi')
+_pykakasi_metadata = copy_metadata('pykakasi')
+
 # --- Hidden imports ---
 _hiddenimports = [
     'PySide6.QtCore',
@@ -17,6 +22,7 @@ _hiddenimports = [
     'av', 'av.codec', 'av.format', 'av.container', 'av.stream',
     'av.filter', 'av.sidedata', 'av.codec.codec', 'av.codec.context',
     'pygrabber.dshow_graph',
+    'pykakasi', 'pykakasi.kakasi', 'jaconv',
     'numpy',
 ]
 
@@ -27,7 +33,11 @@ a = Analysis(
     ['app/__main__.py'],
     pathex=['.'],
     binaries=[],
-    datas=[],
+    datas=(
+        _pykakasi_datas
+        + _pykakasi_metadata
+        + [('THIRD_PARTY_NOTICES.md', '.')]
+    ),
     hiddenimports=_hiddenimports,
     hookspath=[],
     hooksconfig={},
