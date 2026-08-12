@@ -15,6 +15,19 @@ from ui.mainwindow import MainWindow  # noqa: E402
 app = QApplication.instance() or QApplication([])
 
 
+EXPECTED_ACTIONS = {
+    "ctrl_alt_delete": "Ctrl+Alt+Delete",
+    "ctrl_shift_escape": "Ctrl+Shift+Esc",
+    "alt_f4": "Alt+F4",
+    "win_l": "Win+L",
+    "win_r": "Win+R",
+    "command_option_escape": "Command+Option+Esc",
+    "delete": "Delete",
+    "f2": "F2",
+    "f12": "F12",
+}
+
+
 def _window(tmp_path, monkeypatch):
     settings = QSettings(
         str(tmp_path / "settings.ini"),
@@ -31,16 +44,27 @@ def _window(tmp_path, monkeypatch):
 
 def test_special_key_action_tracks_connection_state(tmp_path, monkeypatch):
     window = _window(tmp_path, monkeypatch)
-    action = window._special_key_actions["ctrl_alt_delete"]
 
-    assert action.text() == "Ctrl+Alt+Delete"
-    assert action.isEnabled() is False
+    assert {
+        preset_id: action.text()
+        for preset_id, action in window._special_key_actions.items()
+    } == EXPECTED_ACTIONS
+    assert all(
+        not action.isEnabled()
+        for action in window._special_key_actions.values()
+    )
 
     window._on_serial_connected(True)
-    assert action.isEnabled() is True
+    assert all(
+        action.isEnabled()
+        for action in window._special_key_actions.values()
+    )
 
     window._on_serial_connected(False)
-    assert action.isEnabled() is False
+    assert all(
+        not action.isEnabled()
+        for action in window._special_key_actions.values()
+    )
     window.close()
     window.deleteLater()
 
