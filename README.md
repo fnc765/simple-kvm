@@ -43,11 +43,15 @@ simple-kvm/
 │   ├── core/
 │   │   ├── amical_bridge.py # Amical音声入力→ローマ字HID変換
 │   │   ├── capture.py      # OpenCV キャプチャスレッド
+│   │   ├── clipboard_base64.py # クリップボード文字列→Base64変換
+│   │   ├── hid_typing.py   # 生成文字列→連続HIDキー入力
 │   │   ├── input_hook.py   # 入力状態管理
+│   │   ├── keyboard_layouts.py # Base64送信用JIS/US配列定義
 │   │   ├── keymap.py       # Qt.Key → HID Usage ID 変換
 │   │   ├── protocol.py     # パケットエンコーダ
 │   │   └── serial_comm.py  # シリアル通信スレッド
 │   └── ui/
+│       ├── base64_transfer_dialog.py # Base64送信進捗・中断UI
 │       ├── mainwindow.py   # メインウィンドウ
 │       └── settings_dialog.py
 ├── docs/
@@ -99,6 +103,10 @@ python main.py
 6. Amical音声入力を転送する場合は **Input → Amical Romaji Forwarding** をオンにします
    - KVMフォーカス中にF9を押して話し、離すと、日本語の文字起こしがローマ字としてターゲットへ入力されます
    - Enterは自動送信されません。内容を確認して手動で送信してください
+7. クリップボードのテキストを標準Base64として送る場合は、EscでKVMフォーカスを解除してから **Input → Send Clipboard as Base64…** を選びます
+   - UTF-8化したテキストのBase64本文だけを入力し、Enterや開始・終了マーカーは追加しません
+   - ターゲットの配列に合わせて **Japanese (JIS)** または **US** を選びます（既定はJIS、選択は次回も保持）
+   - ダイアログで送信率を確認でき、送信途中で中断できます
 
 ---
 
@@ -121,6 +129,12 @@ python main.py
   - BIOS / ブートメニュー: Delete、F2、F12
 - **Amicalローマ字転送**: AmicalのF9音声入力結果をホスト側でローマ字化し、英数字とスペースのHIDキー入力としてターゲットへ送信します。ターゲット側の受信ソフトやIMEは不要です
   - F9を離してから15秒以内に届いたAmicalの貼り付けを処理し、1回につき最大1,000文字を送信します
+- **クリップボードBase64送信**: クリップボードのプレーンテキスト全体をUTF-8の標準Base64へ変換し、Base64本文だけをHIDキー入力として送ります
+  - 送信前に元文字数、UTF-8バイト数、Base64文字数、概算時間を表示します
+  - 送信中は、COMへ押下・解放レポートを書き終えたBase64文字数をパーセント表示します。100%はクライアント側の受信ACKを意味しません
+  - 中断時は全キー解放レポートを送り、途中までのBase64はクライアント側で破棄する前提です
+  - 送信ダイアログでJapanese (JIS)／US配列を選択できます。既定はJISで、最後の選択を設定に保存します
+  - 配列選択で変わるのは標準Base64中の `+` と `=` のHIDキー割り当てだけで、送るBase64本文自体は変わりません
 - **マウスモード切替** (Phase 1〜2 ホスト側のみ): Settings ダイアログの「Mouse Mode」で以下を選択できます
   - **Relative** (既定): 既存挙動。カーソルを画面中央へ固定し相対 dx/dy を送る
   - **Hybrid**: KVM 開始時に VideoWidget 上のクリック座標へターゲットカーソルをジャンプさせた後、Relative と同じ動作

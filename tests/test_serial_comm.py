@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 from core.serial_comm import (  # noqa: E402
     PacketSequence,
     PacketStep,
+    SequenceOutcome,
     SerialComm,
     _write_queue_item,
 )
@@ -118,10 +119,57 @@ def test_cancelled_sequence_stops_and_sends_cleanup():
         cancel_event=cancel,
     )
 
-    _write_queue_item(fake, sequence, sleeper=cancel_after_first_step)
+    outcome = _write_queue_item(
+        fake,
+        sequence,
+        sleeper=cancel_after_first_step,
+    )
 
     assert sleeps == [0.010]
     assert fake.writes == [b"press", b"cleanup"]
+    assert outcome is SequenceOutcome.CANCELLED
+
+
+def test_tracked_sequence_reports_completed_units_after_successful_writes():
+    fake = FakeSerial()
+    progress = []
+    sequence = PacketSequence(
+        (
+            PacketStep(b"press-a"),
+            PacketStep(b"release-a", progress_units=1),
+            PacketStep(b"press-b"),
+            PacketStep(b"release-b", progress_units=1),
+        ),
+        transfer_id="transfer-1",
+        progress_total=2,
+    )
+
+    outcome = _write_queue_item(
+        fake,
+        sequence,
+        sleeper=lambda _seconds: None,
+        on_progress=lambda completed, total: progress.append(
+            (completed, total)
+        ),
+    )
+
+    assert outcome is SequenceOutcome.COMPLETED
+    assert progress == [(1, 2), (2, 2)]
+    assert fake.writes == [
+        b"press-a",
+        b"release-a",
+        b"press-b",
+        b"release-b",
+    ]
+
+
+def test_tracked_sequence_rejects_inconsistent_progress_metadata():
+    with pytest.raises(ValueError, match="progress total"):
+        PacketSequence(
+            (PacketStep(b"release", progress_units=1),),
+            transfer_id="transfer-1",
+            progress_total=2,
+        )
 
 
 def test_stop_wait_budget_covers_a_complete_three_write_sequence():
