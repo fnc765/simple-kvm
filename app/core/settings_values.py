@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .keyboard_layouts import KeyboardLayout, coerce_keyboard_layout
 from .mouse_modes import MouseMode, normalize_mouse_mode
 
 # ---------------------------------------------------------------------------
@@ -26,10 +27,12 @@ from .mouse_modes import MouseMode, normalize_mouse_mode
 MOUSE_MODE_KEY: str = "input/mouse_mode"
 FIRMWARE_ABS_KEY: str = "input/firmware_abs_supported"
 AMICAL_ROMAJI_ENABLED_KEY: str = "input/amical_romaji_enabled"
+BASE64_KEYBOARD_LAYOUT_KEY: str = "input/base64_keyboard_layout"
 
 DEFAULT_MOUSE_MODE: MouseMode = MouseMode.RELATIVE
 DEFAULT_FIRMWARE_ABS_SUPPORTED: bool = False
 DEFAULT_AMICAL_ROMAJI_ENABLED: bool = False
+DEFAULT_BASE64_KEYBOARD_LAYOUT: KeyboardLayout = KeyboardLayout.JIS
 
 
 # ---------------------------------------------------------------------------
@@ -97,4 +100,32 @@ def write_amical_romaji_enabled_setting(settings: Any, enabled: bool) -> None:
     settings.setValue(
         AMICAL_ROMAJI_ENABLED_KEY,
         "true" if enabled else "false",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Base64 generated-text keyboard layout
+# ---------------------------------------------------------------------------
+
+
+def read_base64_keyboard_layout_setting(settings: Any) -> KeyboardLayout:
+    """Return the target layout used for generated Base64 symbols."""
+    raw = settings.value(
+        BASE64_KEYBOARD_LAYOUT_KEY,
+        DEFAULT_BASE64_KEYBOARD_LAYOUT.value,
+    )
+    try:
+        return coerce_keyboard_layout(raw)
+    except ValueError:
+        return DEFAULT_BASE64_KEYBOARD_LAYOUT
+
+
+def write_base64_keyboard_layout_setting(
+    settings: Any,
+    layout: KeyboardLayout | str,
+) -> None:
+    """Persist the selected target keyboard layout."""
+    settings.setValue(
+        BASE64_KEYBOARD_LAYOUT_KEY,
+        coerce_keyboard_layout(layout).value,
     )

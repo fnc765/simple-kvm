@@ -11,6 +11,7 @@ import queue
 import re
 import time
 from dataclasses import dataclass
+from enum import Enum
 from threading import Event
 from typing import Callable
 
@@ -26,12 +27,15 @@ class PacketStep:
 
     data: bytes
     delay_after_ms: int = 0
+    progress_units: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.data, bytes) or not self.data:
             raise ValueError("packet data must be non-empty bytes")
         if self.delay_after_ms < 0:
             raise ValueError("packet delay cannot be negative")
+        if self.progress_units < 0:
+            raise ValueError("packet progress units cannot be negative")
 
 
 @dataclass(frozen=True)
@@ -41,6 +45,8 @@ class PacketSequence:
     steps: tuple[PacketStep, ...]
     cleanup_data: bytes | None = None
     cancel_event: Event | None = None
+    transfer_id: str | None = None
+    progress_total: int = 0
 
     def __post_init__(self) -> None:
         if not self.steps:
@@ -49,6 +55,22 @@ class PacketSequence:
             not isinstance(self.cleanup_data, bytes) or not self.cleanup_data
         ):
             raise ValueError("sequence cleanup data must be non-empty bytes")
+        if self.progress_total < 0:
+            raise ValueError("sequence progress total cannot be negative")
+        if self.progress_total and not self.transfer_id:
+            raise ValueError("tracked sequence requires a transfer id")
+        progress_units = sum(step.progress_units for step in self.steps)
+        if progress_units != self.progress_total:
+            raise ValueError(
+                "sequence progress total must equal its step progress units"
+            )
+
+
+class SequenceOutcome(str, Enum):
+    """Terminal result for one queued packet sequence."""
+
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
 
 
 QueueItem = bytes | PacketSequence
@@ -68,12 +90,14 @@ def _write_queue_item(
     item: QueueItem,
     sleeper=time.sleep,
     should_stop: Callable[[], bool] | None = None,
-) -> None:
+    on_progress: Callable[[int, int], None] | None = None,
+) -> SequenceOutcome | None:
     """Write a normal packet or a complete atomic sequence to *ser*."""
     if isinstance(item, bytes):
         ser.write(item)
-        return
+        return None
 
+    completed_units = 0
     try:
         for step in item.steps:
             if (should_stop is not None and should_stop()) or (
@@ -81,13 +105,18 @@ def _write_queue_item(
                 and item.cancel_event.is_set()
             ):
                 _write_cleanup(ser, item)
-                return
+                return SequenceOutcome.CANCELLED
             ser.write(step.data)
+            if step.progress_units:
+                completed_units += step.progress_units
+                if on_progress is not None:
+                    on_progress(completed_units, item.progress_total)
             if step.delay_after_ms:
                 sleeper(step.delay_after_ms / 1_000)
     except Exception:
         _write_cleanup(ser, item)
         raise
+    return SequenceOutcome.COMPLETED
 
 
 class SerialComm(QThread):
@@ -101,6 +130,8 @@ class SerialComm(QThread):
     """
 
     connected: Signal = Signal(bool)
+    sequence_progress: Signal = Signal(str, int, int)
+    sequence_finished: Signal = Signal(str, str)
 
     _SEND_TIMEOUT = 0.05  # seconds to wait for a new packet before looping
 
@@ -161,11 +192,38 @@ class SerialComm(QThread):
                 while not self.isInterruptionRequested():
                     try:
                         item = self._queue.get(timeout=self._SEND_TIMEOUT)
-                        _write_queue_item(
-                            ser,
-                            item,
-                            should_stop=self.isInterruptionRequested,
+                        transfer_id = (
+                            item.transfer_id
+                            if isinstance(item, PacketSequence)
+                            else None
                         )
+                        progress_callback = None
+                        if transfer_id is not None:
+                            def progress_callback(
+                                completed: int,
+                                total: int,
+                                tracked: str = transfer_id,
+                            ) -> None:
+                                self.sequence_progress.emit(
+                                    tracked, completed, total
+                                )
+                        try:
+                            outcome = _write_queue_item(
+                                ser,
+                                item,
+                                should_stop=self.isInterruptionRequested,
+                                on_progress=progress_callback,
+                            )
+                        except Exception:
+                            if transfer_id is not None:
+                                self.sequence_finished.emit(
+                                    transfer_id, "failed"
+                                )
+                            raise
+                        if transfer_id is not None and outcome is not None:
+                            self.sequence_finished.emit(
+                                transfer_id, outcome.value
+                            )
                     except queue.Empty:
                         pass  # nothing to send; loop back
                     except serial.SerialTimeoutException:

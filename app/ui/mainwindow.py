@@ -30,6 +30,7 @@ import ctypes
 import time
 from ctypes import wintypes
 from threading import Event
+from uuid import uuid4
 
 from PySide6.QtCore import QPoint, QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import (
@@ -59,6 +60,10 @@ from core.capture import (
     ORGANIZATION,
     APP_NAME,
     list_dshow_devices,
+)
+from core.clipboard_base64 import (
+    build_base64_typing_sequence,
+    encode_clipboard_text,
 )
 from core.amical_bridge import (
     AMICAL_F9_SCANCODE,
@@ -95,13 +100,16 @@ from core.mouse_modes import (
 from core.serial_comm import SerialComm
 from core.special_keys import SPECIAL_KEY_PRESETS, SpecialKeyPreset
 from core.settings_values import (
+    read_base64_keyboard_layout_setting,
     read_amical_romaji_enabled_setting,
     read_mouse_mode_setting,
     read_firmware_abs_setting,
+    write_base64_keyboard_layout_setting,
     write_amical_romaji_enabled_setting,
     write_mouse_mode_setting,
     write_firmware_abs_setting,
 )
+from ui.base64_transfer_dialog import Base64TransferDialog
 from ui.settings_dialog import SettingsDialog
 
 
@@ -181,9 +189,15 @@ class MainWindow(QMainWindow):
         self._amical_enabled = read_amical_romaji_enabled_setting(
             self._settings
         )
+        self._base64_keyboard_layout = read_base64_keyboard_layout_setting(
+            self._settings
+        )
         self._amical_gate = AmicalPasteGate()
         self._amical_injected_chord_active = False
         self._amical_send_cancel: Event | None = None
+        self._base64_transfer_id: str | None = None
+        self._base64_send_cancel: Event | None = None
+        self._base64_dialog: Base64TransferDialog | None = None
 
         # ---- Video widget ---------------------------------------------------
         self._video_widget = VideoWidget(self)
@@ -254,6 +268,17 @@ class MainWindow(QMainWindow):
             "romaji, and type it on the target without pressing Enter."
         )
         self._amical_enabled_action.toggled.connect(self._set_amical_enabled)
+        self._base64_clipboard_action = input_menu.addAction(
+            "Send Clipboard as Base64…"
+        )
+        self._base64_clipboard_action.setEnabled(False)
+        self._base64_clipboard_action.setToolTip(
+            "Type the complete UTF-8 clipboard text as standard Base64 "
+            "without adding Enter or framing characters."
+        )
+        self._base64_clipboard_action.triggered.connect(
+            self._open_base64_transfer
+        )
         input_menu.addSeparator()
         special_keys_menu = input_menu.addMenu("Send Special Keys")
         self._special_key_actions = {}
@@ -304,6 +329,12 @@ class MainWindow(QMainWindow):
         # ---- Serial communication -------------------------------------------
         self._serial = SerialComm(self)
         self._serial.connected.connect(self._on_serial_connected)
+        self._serial.sequence_progress.connect(
+            self._on_base64_sequence_progress
+        )
+        self._serial.sequence_finished.connect(
+            self._on_base64_sequence_finished
+        )
 
         # ---- Capture thread -------------------------------------------------
         self._capture = CaptureThread(DEFAULT_DEVICE, self)
@@ -412,6 +443,7 @@ class MainWindow(QMainWindow):
 
     def _apply_settings(self) -> None:
         self._set_kvm_active(False)
+        self._cancel_base64_transfer()
 
         # Restart serial
         self._serial.stop()
@@ -433,12 +465,16 @@ class MainWindow(QMainWindow):
         self._connected = connected
         for action in self._special_key_actions.values():
             action.setEnabled(connected)
+        self._refresh_base64_action()
         if connected:
             self._status.showMessage(f"Connected: {self._port}")
         else:
             if self._amical_send_cancel is not None:
                 self._amical_send_cancel.set()
                 self._amical_send_cancel = None
+            if self._base64_transfer_id is not None:
+                self._cancel_base64_transfer()
+                self._finish_base64_transfer("failed")
             self._status.showMessage("Disconnected")
 
     def _on_frame_ready(self, image: QImage) -> None:
@@ -470,7 +506,10 @@ class MainWindow(QMainWindow):
                 self._send_hybrid_jump()
 
     def _send_heartbeat(self) -> None:
-        if self._serial.isRunning():
+        if (
+            self._base64_transfer_id is None
+            and self._serial.isRunning()
+        ):
             self._serial.enqueue(build_heartbeat())
 
     def _send_special_key(self, preset: SpecialKeyPreset) -> None:
@@ -487,6 +526,156 @@ class MainWindow(QMainWindow):
             self._status.showMessage(
                 f"Special keys not sent: send queue full ({preset.label})"
             )
+
+    def _refresh_base64_action(self) -> None:
+        self._base64_clipboard_action.setEnabled(
+            self._connected
+            and self._base64_transfer_id is None
+            and self._base64_dialog is None
+        )
+
+    def _open_base64_transfer(self) -> None:
+        """Open a confirmation/progress dialog for the current text clipboard."""
+        if not self._connected:
+            self._status.showMessage(
+                "Clipboard Base64 not sent: serial is disconnected"
+            )
+            return
+        if self._base64_dialog is not None:
+            self._base64_dialog.raise_()
+            self._base64_dialog.activateWindow()
+            return
+
+        clipboard = QApplication.clipboard()
+        mime_data = clipboard.mimeData()
+        if mime_data is None or not mime_data.hasText():
+            self._status.showMessage(
+                "Clipboard Base64 not sent: clipboard has no text"
+            )
+            return
+        try:
+            payload = encode_clipboard_text(clipboard.text())
+        except (TypeError, ValueError):
+            self._status.showMessage(
+                "Clipboard Base64 not sent: clipboard text is empty"
+            )
+            return
+
+        dialog = Base64TransferDialog(
+            payload,
+            keyboard_layout=self._base64_keyboard_layout,
+            parent=self,
+        )
+        dialog.start_requested.connect(
+            lambda tracked=dialog: self._start_base64_transfer(tracked)
+        )
+        dialog.cancel_requested.connect(self._cancel_base64_transfer)
+        dialog.finished.connect(
+            lambda _result, tracked=dialog:
+            self._on_base64_dialog_closed(tracked)
+        )
+        self._base64_dialog = dialog
+        self._refresh_base64_action()
+        dialog.open()
+
+    def _start_base64_transfer(
+        self,
+        dialog: Base64TransferDialog,
+    ) -> None:
+        """Queue one tracked Base64 sequence after explicit confirmation."""
+        if dialog is not self._base64_dialog:
+            return
+        if self._base64_transfer_id is not None:
+            return
+        if not self._connected:
+            dialog.set_outcome("failed")
+            self._status.showMessage(
+                "Clipboard Base64 not sent: serial is disconnected"
+            )
+            return
+
+        self._set_kvm_active(False)
+        transfer_id = uuid4().hex
+        cancel_event = Event()
+        self._base64_keyboard_layout = dialog.keyboard_layout
+        sequence = build_base64_typing_sequence(
+            dialog.payload,
+            transfer_id=transfer_id,
+            cancel_event=cancel_event,
+            keyboard_layout=self._base64_keyboard_layout,
+        )
+        self._save_settings()
+
+        self._base64_transfer_id = transfer_id
+        self._base64_send_cancel = cancel_event
+        dialog.begin_transfer()
+        self._refresh_base64_action()
+
+        if not self._serial.enqueue_sequence(sequence):
+            cancel_event.set()
+            self._finish_base64_transfer("failed")
+            self._status.showMessage(
+                "Clipboard Base64 not sent: send queue is full"
+            )
+            return
+
+        self._status.showMessage(
+            "Sending clipboard Base64: "
+            f"0 / {dialog.payload.encoded_characters} characters"
+        )
+
+    def _cancel_base64_transfer(self) -> None:
+        """Request cancellation without blocking the GUI thread."""
+        if self._base64_send_cancel is None:
+            return
+        self._base64_send_cancel.set()
+        self._status.showMessage("Cancelling clipboard Base64 transfer…")
+
+    def _on_base64_sequence_progress(
+        self,
+        transfer_id: str,
+        completed: int,
+        total: int,
+    ) -> None:
+        if transfer_id != self._base64_transfer_id:
+            return
+        if self._base64_dialog is not None:
+            self._base64_dialog.set_progress(completed, total)
+
+    def _on_base64_sequence_finished(
+        self,
+        transfer_id: str,
+        outcome: str,
+    ) -> None:
+        if transfer_id != self._base64_transfer_id:
+            return
+        self._finish_base64_transfer(outcome)
+
+    def _finish_base64_transfer(self, outcome: str) -> None:
+        """Clear active transfer state and present its terminal result."""
+        if self._base64_transfer_id is None:
+            return
+        self._base64_transfer_id = None
+        self._base64_send_cancel = None
+        if self._base64_dialog is not None:
+            self._base64_dialog.set_outcome(outcome)
+        self._refresh_base64_action()
+
+        messages = {
+            "completed": "Clipboard Base64 transfer completed",
+            "cancelled": "Clipboard Base64 transfer cancelled",
+            "failed": "Clipboard Base64 transfer failed",
+        }
+        self._status.showMessage(messages.get(outcome, messages["failed"]))
+
+    def _on_base64_dialog_closed(
+        self,
+        dialog: Base64TransferDialog,
+    ) -> None:
+        if dialog is not self._base64_dialog:
+            return
+        self._base64_dialog = None
+        self._refresh_base64_action()
 
     def _set_amical_enabled(self, enabled: bool) -> None:
         """Enable or disable opt-in F9-to-romaji forwarding."""
@@ -627,6 +816,8 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------------
 
     def _set_kvm_active(self, active: bool) -> None:
+        if active and self._base64_transfer_id is not None:
+            return
         if self._kvm_active == active:
             return
         self._kvm_active = active
@@ -1276,6 +1467,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         self._save_settings()
         self._kvm_click_timer.stop()
+        self._cancel_base64_transfer()
         if self._is_fullscreen:
             self._exit_fullscreen()
         self._set_kvm_active(False)
@@ -1295,6 +1487,7 @@ class MainWindow(QMainWindow):
     #   video/aspect       : str   – "keep" or "fill"
     #   input/mouse_speed  : str   – speed multiplier as string (e.g. "1.0")
     #   input/amical_romaji_enabled : bool – reserve F9 for Amical bridge
+    #   input/base64_keyboard_layout : str – "jis" or "us"
 
     def _save_settings(self) -> None:
         """Write current settings to persistent storage."""
@@ -1309,6 +1502,10 @@ class MainWindow(QMainWindow):
         write_amical_romaji_enabled_setting(
             self._settings,
             self._amical_enabled,
+        )
+        write_base64_keyboard_layout_setting(
+            self._settings,
+            self._base64_keyboard_layout,
         )
         self._settings.sync()
 
