@@ -77,9 +77,11 @@ BP2 の HID Composite は **3 つの HID インターフェース**を露出し�
 |-----------|-------|----------|--------|
 | 0 (Keyboard) | HID | Boot Keyboard (LED 出力付き) | 8 バイト入力 + 1 バイト出力 (LED) |
 | 1 (Mouse)    | HID | Boot Mouse (5-byte relative) | `[buttons, dx, dy, wheel_v, wheel_h]` |
-| 2 (Abs Mouse) | HID | Generic Desktop Mouse (absolute) | `[buttons, x_lo, x_hi, y_lo, y_hi]` |
+| 2 (Abs Mouse) | HID | Generic Desktop Mouse (absolute、non-boot) | `[buttons, x_lo, x_hi, y_lo, y_hi]` |
 
 絶対座標マウスを使うには、ホスト側 Settings の **「Firmware supports absolute HID」** チェックボックスをオンにしてください。オフのときは absolute HID 用のパケット (`PKT_MOUSE_ABS`) は送られないので、レガシーフレームウェア (Phase 1〜2) でも問題なく動作します。
+
+BP2 は絶対座標レポートを USB IN 転送完了まで保持します。連続する同一ボタン状態の移動は最新座標へ集約し、押下・解放の変化は FIFO 順で処理します。また、ホストからの heartbeat を含む有効パケットが 2.5 秒途絶えた状態で絶対ボタンが押下中なら、最後の座標で解放レポートを生成します。USB の切断・再列挙時には未送信クリックを破棄し、再接続後に古い操作を再生しません。
 
 水平スクロール (wheel_h) は STM32duino 内蔵 HID Composite が非サポートのため、受信しても破棄されます。
 
