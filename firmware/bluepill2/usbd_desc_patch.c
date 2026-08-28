@@ -9,7 +9,6 @@
   *   (b) bMaxPacketSize: 0x08 (Logitech C52B uses EP0 size 8)
   *   (c) iSerial: 0x00 (no serial number string, matching Logitech C52B)
   *   (d) USBD_SerialStrDescriptor returns length 0 (iSerial=0 equivalent)
-  *   (e) Get_SerialNum() is a no-op
   *
   * Original source:
   *   ~/.platformio/packages/framework-arduinoststm32/libraries/USBDevice/src/usbd_desc.c
@@ -160,15 +159,26 @@ __ALIGN_BEGIN uint8_t USBD_Class_DeviceDesc[USB_LEN_DEV_DESC] __ALIGN_END = {
   0x00,                       /* bcdUSB */
 #endif /* (USBD_LPM_ENABLED == 1) || (USBD_CLASS_BOS_ENABLED == 1) */
   0x02,
+#ifdef SIMPLE_KVM_AUDIO
+  0xEF,                       /* bDeviceClass: Miscellaneous / IAD */
+  0x02,                       /* bDeviceSubClass: Common Class */
+  0x01,                       /* bDeviceProtocol: IAD */
+  USB_MAX_EP0_SIZE,           /* bMaxPacketSize */
+#else
   0x00,                       /* bDeviceClass */
   0x00,                       /* bDeviceSubClass */
   0x00,                       /* bDeviceProtocol */
   0x08,                       /* bMaxPacketSize (Logitech C52B: 8) */
+#endif
   LOBYTE(USBD_VID),           /* idVendor */
   HIBYTE(USBD_VID),           /* idVendor */
   LOBYTE(USBD_PID),           /* idProduct */
   HIBYTE(USBD_PID),           /* idProduct */
+#ifdef SIMPLE_KVM_AUDIO
+  0x02,                       /* bcdDevice rel. 24.02 (audio development) */
+#else
   0x01,                       /* bcdDevice rel. 24.01 (Phase 3) */
+#endif
   0x18,
   USBD_IDX_MFC_STR,           /* Index of manufacturer string */
   USBD_IDX_PRODUCT_STR,       /* Index of product string */
@@ -179,7 +189,8 @@ __ALIGN_BEGIN uint8_t USBD_Class_DeviceDesc[USB_LEN_DEV_DESC] __ALIGN_END = {
 
 #ifdef USBD_USE_CDC
 /* USB Standard Device Descriptor
- * PATCHED: bMaxPacketSize=0x08, bcdDevice=24.00, iSerial=0x00 */
+ * Audio profile uses the device-level IAD tuple.  Legacy BP1 never compiles
+ * this project patch and therefore retains STM32duino's CDC descriptor. */
 __ALIGN_BEGIN uint8_t USBD_Class_DeviceDesc[USB_LEN_DEV_DESC] __ALIGN_END = {
   0x12,                       /* bLength */
   USB_DESC_TYPE_DEVICE,       /* bDescriptorType */
@@ -189,15 +200,26 @@ __ALIGN_BEGIN uint8_t USBD_Class_DeviceDesc[USB_LEN_DEV_DESC] __ALIGN_END = {
   0x00,                       /* bcdUSB */
 #endif
   0x02,
+#ifdef SIMPLE_KVM_AUDIO
+  0xEF,                       /* bDeviceClass: Miscellaneous / IAD */
+  0x02,                       /* bDeviceSubClass: Common Class */
+  0x01,                       /* bDeviceProtocol: IAD */
+  USB_MAX_EP0_SIZE,           /* bMaxPacketSize */
+#else
   0x02,                       /* bDeviceClass */
   0x02,                       /* bDeviceSubClass */
   0x00,                       /* bDeviceProtocol */
-  0x08,                       /* bMaxPacketSize (Logitech C52B: 8) */
+  0x08,                       /* bMaxPacketSize (legacy patch) */
+#endif
   LOBYTE(USBD_VID),           /* idVendor */
   HIBYTE(USBD_VID),           /* idVendor */
   LOBYTE(USBD_PID),           /* idProduct */
   HIBYTE(USBD_PID),           /* idProduct */
-  0x00,                       /* bcdDevice rel. 24.00 (BP1 unchanged) */
+#ifdef SIMPLE_KVM_AUDIO
+  0x02,                       /* bcdDevice rel. 24.02 (audio development) */
+#else
+  0x00,                       /* bcdDevice rel. 24.00 (legacy patch) */
+#endif
   0x18,
   USBD_IDX_MFC_STR,           /* Index of manufacturer string */
   USBD_IDX_PRODUCT_STR,       /* Index of product string */
@@ -329,8 +351,6 @@ uint8_t USBD_StringSerial[USB_SIZ_STRING_SERIAL] = {
 __ALIGN_BEGIN uint8_t USBD_StrDesc[USBD_MAX_STR_DESC_SIZ] __ALIGN_END;
 
 /* Private functions ---------------------------------------------------------*/
-static void IntToUnicode(uint32_t value, uint8_t *pbuf, uint8_t len);
-static void Get_SerialNum(void);
 
 /**
   * @brief  Returns the device descriptor.
@@ -435,17 +455,6 @@ uint8_t *USBD_Class_InterfaceStrDescriptor(USBD_SpeedTypeDef speed, uint16_t *le
   return USBD_StrDesc;
 }
 
-/**
-  * @brief  PATCHED: No-op serial number generator (iSerial=0).
-  * @param  None
-  * @retval None
-  */
-static void Get_SerialNum(void)
-{
-  /* No-op: serial number string is disabled (iSerial=0) */
-}
-
-
 #if ((USBD_LPM_ENABLED == 1) || (USBD_CLASS_BOS_ENABLED == 1))
 /**
   * @brief  USBD_USR_BOSDescriptor
@@ -482,28 +491,5 @@ uint8_t *USBD_Class_UserStrDescriptor(USBD_SpeedTypeDef speed, uint8_t idx, uint
 #endif /* USBD_CLASS_USER_STRING_DESC */
 
 
-/**
-  * @brief  Convert Hex 32Bits value into char
-  * @param  value: value to convert
-  * @param  pbuf: pointer to the buffer
-  * @param  len: buffer length
-  * @retval None
-  */
-static void IntToUnicode(uint32_t value, uint8_t *pbuf, uint8_t len)
-{
-  uint8_t idx = 0U;
-
-  for (idx = 0U ; idx < len ; idx ++) {
-    if (((value >> 28)) < 0xAU) {
-      pbuf[ 2U * idx] = (value >> 28) + '0';
-    } else {
-      pbuf[2U * idx] = (value >> 28) + 'A' - 10U;
-    }
-
-    value = value << 4;
-
-    pbuf[2U * idx + 1] = 0U;
-  }
-}
 #endif /* USBCON */
 /************************ End of patched file *****END OF FILE****/
