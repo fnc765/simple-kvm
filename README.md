@@ -135,14 +135,16 @@ python main.py
   - 中断時は全キー解放レポートを送り、途中までのBase64はクライアント側で破棄する前提です
   - 送信ダイアログでJapanese (JIS)／US配列を選択できます。既定はJISで、最後の選択を設定に保存します
   - 配列選択で変わるのは標準Base64中の `+` と `=` のHIDキー割り当てだけで、送るBase64本文自体は変わりません
-- **マウスモード切替** (Phase 1〜2 ホスト側のみ): Settings ダイアログの「Mouse Mode」で以下を選択できます
+- **マウスモード切替**: Settings ダイアログの「Mouse Mode」で以下を選択できます
   - **Relative** (既定): 既存挙動。カーソルを画面中央へ固定し相対 dx/dy を送る
   - **Hybrid**: KVM 開始時に VideoWidget 上のクリック座標へターゲットカーソルをジャンプさせた後、Relative と同じ動作
   - **Absolute**: VideoWidget 内のホストカーソル位置をそのままターゲット PC の絶対座標として送信
+    - KVM を開始したシングルクリックは、同じ絶対座標への `移動 → 押下 → 解放` として転送します
+    - 連続移動は最新座標へ集約し、押下・解放は順序を保って送るため、古い移動の滞留やボタン状態の取りこぼしを抑えます
   - **「Firmware supports absolute HID」** チェックボックス: 旧ファームウェア (Phase 1〜2) ではオフのまま。Phase 3 firmware を書き込んだ BP2 を使うときだけオンにする
 - **設定の永続化**: COM ポート、キャプチャデバイス、アスペクト比、マウス速度、マウスモード、ファームウェア abs サポート設定は自動的に保存され、次回起動時に復元されます。起動時に前回のデバイスが存在すれば自動接続されます
 
-> **Note**: `Hybrid` / `Absolute` モードを使うには **Phase 3 firmware** が BP2 に書き込まれている必要があります。Phase 1〜2 の現行 firmware では「Firmware supports absolute HID」をオンにしないでください（unknown packet としてエラーブリンクします）。Phase 3 firmware は別 PR で提供予定です。
+> **Note**: `Hybrid` / `Absolute` モードを使うには、このリポジトリの **Phase 3 firmware** を BP2 に書き込む必要があります。Phase 1〜2 の旧 firmware では「Firmware supports absolute HID」をオンにしないでください（unknown packet としてエラーブリンクします）。
 
 > **SteamVR / OVR 対応**: `Absolute` モードは SteamVR Desktop dashboard (VR 内に Windows desktop を映す機能) での操作性を改善します。OVR Advanced Settings (OVRAS) の VR 内ダッシュボードオーバーレイは OpenVR overlay event 経路で動作するため、本プロジェクトの HID-only 範囲では完全対応しません。
 
