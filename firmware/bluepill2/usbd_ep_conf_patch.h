@@ -1,15 +1,16 @@
 /**
   ******************************************************************************
   * @file    usbd_ep_conf_patch.h
-  * @brief   Patch: Endpoint configuration overrides for C52B emulation
+  * @brief   Compatibility note for the endpoint configuration override
   *
-  * This file documents the endpoint configuration changes needed.
-  * Actual overrides are applied in usbd_hid_composite_patch.h via #undef/#define
-  * after including the original usbd_ep_conf.h.
+  * The active PlatformIO override is usbd_ep_conf_override.h.  It is
+  * force-included for every bluepill2 translation unit so STM32duino's
+  * low-level USB initializer and the project patch use the same endpoint count.
   *
   * Changes:
   *   - HID_MOUSE_EPIN_SIZE: 0x04 → 0x08 (8-byte mouse endpoint for 5-byte report)
-  *   - PMA buffer addresses recalculated automatically via macro expansion
+  *   - DEV_NUM_EP: 0x03 -> 0x04 (EP0 plus three HID IN endpoints)
+  *   - PMA buffer addresses include the absolute-mouse endpoint
   *
   * Original source:
   *   ~/.platformio/packages/framework-arduinoststm32/libraries/USBDevice/inc/usbd_ep_conf.h
@@ -22,17 +23,9 @@
 #ifdef USBCON
 
 /*
- * The original usbd_ep_conf.h is included by usbd_hid_composite_patch.h.
- * Overrides are applied there via:
- *
- *   #include "usbd_ep_conf.h"
- *   #ifdef HID_MOUSE_EPIN_SIZE
- *   #undef HID_MOUSE_EPIN_SIZE
- *   #endif
- *   #define HID_MOUSE_EPIN_SIZE           0x08U
- *
- * This ensures HID_MOUSE_EPIN_SIZE=8 in the patched compilation unit.
- * The build flag -D HID_MOUSE_EPIN_SIZE=0x08 also provides a global default.
+ * Kept as a named compatibility/documentation header for existing references.
+ * New code should include usbd_ep_conf.h normally; platformio.ini injects the
+ * complete project override before STM32duino's stock header is parsed.
  */
 
 #endif /* USBCON */
