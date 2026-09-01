@@ -4,10 +4,9 @@
   * @brief   PATCH: Endpoint configuration with 4 endpoints for the 3-interface
   *          HID composite (Keyboard + Relative Mouse + Absolute Mouse)
   *
-  * This file overrides the framework's usbd_ep_conf.c (same symbol names
-  * are used; the linker picks this object file first because it appears
-  * before libUSBDevice.a in the link order, courtesy of the
-  * -Wl,--allow-multiple-definition build flag in platformio.ini).
+  * This file overrides the framework's usbd_ep_conf.c.  The PlatformIO
+  * pre-link action weakens the framework object so these strong definitions
+  * are selected deterministically.
   *
   * Original source:
   *   ~/.platformio/packages/framework-arduinoststm32/libraries/USBDevice/src/usbd_ep_conf.c
