@@ -103,6 +103,19 @@ BP2 は絶対座標レポートを USB IN 転送完了まで保持します。�
 
 Phase 3 BP2 firmware は **3-interface HID composite** (Keyboard + Relative Mouse + Absolute Mouse) を公開します。インターフェース数が変わるので、Windows が古い 2-interface ディスクリプタをキャッシュしていると、初回接続時に「不明な USB デバイス」になることがあります。
 
+`Code 43 / 無効なデバイス記述子` が出る場合は、キャッシュだけでなくビルド時のリンク結果も
+確認してください。旧方式の `--allow-multiple-definition` ではSTM32duino側の2-interface
+実装が先に採用され、4 endpoint用に拡張された配列の末尾がゼロのままEP0設定を上書きする
+ことがありました。現行ビルドはリンク直前にフレームワーク側の重複USBオブジェクトをweak化し、
+リポジトリ側の3-interface実装を確実に採用します。BP2ビルド時に次の3行が表示されることを
+確認してください。
+
+```text
+Weakened framework USB object: USBDevice\src\usbd_desc.c.o
+Weakened framework USB object: USBDevice\src\usbd_ep_conf.c.o
+Weakened framework USB object: USBDevice\src\hid\usbd_hid_composite.c.o
+```
+
 Phase 3 firmware を書き込んだ後、ターゲット PC で以下を試してください:
 
 1. **USB ポートを差し替える** — 別ポートに挿すと Windows が新しいディスクリプタを読み直す
@@ -273,6 +286,7 @@ AmicalがホストPC上で生成した日本語の文字起こしを、ローマ
 |------|---------|
 | COM ポートが見えない | BP1 の USB ケーブルを抜き差し。ビルドフラグ `PIO_FRAMEWORK_ARDUINO_ENABLE_CDC` が有効か確認 |
 | ターゲット PC で HID が認識されない | BP2 のビルドフラグ `USBD_USE_HID_COMPOSITE` が有効か確認。書き込み後 3 秒間のエニュメレーション待機が完了するまで待つ |
+| BP2 が Code 43（無効なデバイス記述子）になる | BP2をクリーンビルドし、上記3件の `Weakened framework USB object` が表示された修正版を書き込む。正常時は `046D:C52B` の MI_00〜MI_02 が列挙される |
 | 映像が表示されない | Device インデックスを変更して試す。他のカメラアプリを終了する |
 | キー入力が届かない | UART クロス接続（PA9↔PA10）を確認 |
 | Amicalの文章が転送されない | Input → Amical Romaji Forwardingがオンか、KVMフォーカス中か、シリアル接続済みかを確認 |
