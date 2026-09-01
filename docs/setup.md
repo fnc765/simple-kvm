@@ -113,6 +113,34 @@ VID/PID/Product string (`046D:C52B` / `Logitech` / `USB Receiver`) は Logitech 
 
 ---
 
+## 3.6. 同一 PC での無人ハードウェアループバック検証
+
+BP1 の USB CDC と BP2 の USB HID を同じ Windows PC に接続すると、専用ハーネスで
+`PC -> BP1 CDC -> UART -> BP2 -> USB HID -> PC Raw Input` を人手なしで検証できます。
+通常の Simple KVM アプリは終了し、BP1–BP2 間の UART と GND を接続した状態で実行します。
+
+```powershell
+python tools/hardware_loopback.py
+```
+
+ハーネスは BP1 を `0483:5740` の COM ポート、BP2 の絶対マウスを
+`046D:C52B / MI_02` の Raw Input デバイスとして個別に識別します。実行中は誤クリックを
+避けるため空の全画面ウィンドウを前面に出し、終了時にはボタン解放レポートを送信して
+元のカーソル位置へ戻します。次をすべて確認できた場合だけ `LOOPBACK_E2E_PASS` になります。
+
+- 5 地点の絶対 Raw Input 座標と Windows カーソル座標
+- `move -> left down -> left up` のデバイス固有イベント順序
+- 連続 200 座標送信後に最終座標へ収束し、古い座標へ戻らないこと
+- ボタン押下後、UART 無通信時に BP2 が約 2.5 秒で解放すること
+
+結果は `logs/hardware_loopback/<timestamp>/result.json` に保存され、このディレクトリは
+Git 管理外です。BP2 が見つからない場合も、Raw Input 一覧と `pnputil` の問題デバイス一覧を
+保存して `BP2_HID_ENUM_FAIL` で終了します。`Code 43 / 無効なデバイス記述子` の場合は、
+別 USB ポートへの差し替え、またはデバイス マネージャーで該当する不明な USB デバイスを
+削除してから再接続し、再度ハーネスを実行してください。
+
+---
+
 ## 4. Python アプリのセットアップ
 
 ### 4-1. 依存パッケージのインストール
