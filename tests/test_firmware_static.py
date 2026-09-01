@@ -287,6 +287,22 @@ def test_four_endpoint_override_is_force_included_for_framework_sources():
     assert "-include firmware/bluepill2/usbd_ep_conf_override.h" in platformio_ini
 
 
+def test_project_usb_overrides_win_deterministically_at_link_time():
+    script = _read("weaken_framework_usb.py")
+    for object_name in (
+        "usbd_desc.c.o",
+        "usbd_ep_conf.c.o",
+        "usbd_hid_composite.c.o",
+    ):
+        assert object_name in script
+    assert 'objcopy, "--weaken"' in script
+
+    with open(os.path.join(REPO_ROOT, "platformio.ini"), encoding="utf-8") as f:
+        platformio_ini = f.read()
+    assert "pre:firmware/bluepill2/weaken_framework_usb.py" in platformio_ini
+    assert "--allow-multiple-definition" not in platformio_ini
+
+
 # ---------------------------------------------------------------------------
 # usbd_desc_patch
 # ---------------------------------------------------------------------------
@@ -297,6 +313,22 @@ def test_bcddevice_bumped_for_phase3():
     assert re.search(r"0x01,\s*/\*\s*bcdDevice rel\. 24\.01", text), (
         "bcdDevice must be bumped to 24.01 (0x01, 0x18) for Phase 3"
     )
+
+
+def test_device_descriptor_ep0_size_matches_usb_core():
+    text = _read("usbd_desc_patch.c")
+    descriptor_blocks = re.findall(
+        r"USBD_Class_DeviceDesc\s*\[[^\]]+\][^{]*\{(.*?)\n\};",
+        text,
+        re.DOTALL,
+    )
+    assert descriptor_blocks
+    for block in descriptor_blocks:
+        assert "USB_MAX_EP0_SIZE" in block
+        assert not re.search(
+            r"0x08,\s*/\*\s*bMaxPacketSize",
+            block,
+        ), "EP0 descriptor size must not diverge from the USB core"
 
 
 # ---------------------------------------------------------------------------
