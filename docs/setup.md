@@ -159,18 +159,14 @@ Git 管理外です。BP2 が見つからない場合も、Raw Input 一覧と `
 ### 4-1. 依存パッケージのインストール
 
 ```powershell
-cd app
 python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install -e .
 ```
 
 ### 4-2. アプリの起動
 
 ```powershell
-cd app
-.venv\Scripts\activate
-python main.py
+.venv\Scripts\python.exe -m app
 ```
 
 ### 4-3. 設定手順
@@ -178,16 +174,45 @@ python main.py
 1. File → Settings を開く
 2. **Serial Port**: BluePill #1 が接続されている COM ポートを選択
    - デバイスマネージャで「ポート (COM と LPT)」→「STMicroelectronics Virtual COM Port」を確認
-3. **Capture Device**: HDMI キャプチャドングルのデバイス番号を選択
-   - PC に他のカメラがある場合は Device 1 以降になることがあります
+3. **Capture Device**: HDMI キャプチャドングルのDirectShowデバイス名を選択
 4. **Aspect Ratio**: 映像のアスペクト比モードを選択
    - **Maintain Aspect Ratio**: アスペクト比を維持（黒帯あり）
    - **Stretch to Fill**: 画面全体に引き伸ばし
-5. **Mouse Speed**: マウスカーソル速度を 0.5x 〜 2.0x の範囲で調整（0.1 刻み）
-6. OK をクリック → 映像が表示されます
+5. **Mouse Speed**: Relative / Hybrid のマウスカーソル速度を 0.5x 〜 2.0x の範囲で調整（Absoluteには適用されません）
+6. **Mouse Mode**: `Relative`、`Hybrid`、`Absolute` から選択
+7. Phase 3 BP2 firmwareで `Hybrid` / `Absolute` を使う場合だけ、**Firmware supports absolute HID** をオンにする
+8. OK をクリック → 映像が表示されます
 
 > **設定は自動的に保存**され、次回起動時に復元されます。
 > COM ポートとキャプチャデバイスが前回と同じ状態で接続されていれば、起動時に自動接続されます。
+
+### 4-4. Absoluteモードの操作境界
+
+Absoluteモードでは、ホストカーソル位置そのものをターゲットの絶対座標へ変換するため、Relative / Hybridのような中央固定やカーソル非表示を行いません。KVM有効中でもsimple-kvmの外へカーソルを移動し、ホスト側の別ウィンドウへ移れます。
+
+誤入力を防ぐため、物理キーボードのHID転送は**ホストカーソルがsimple-kvmウィンドウ内にある間だけ**有効です。
+
+- カーソルがウィンドウ外へ出ると、ターゲット側へ新しいキー入力を送りません
+- 内側で押したキーやShift/Ctrl/Altを保持したまま外へ出た場合は、境界を出た時点で全キー解放レポートを送ります
+- この解放ではKVM有効状態やAbsoluteマウス状態を解除しません
+- Raw InputとQtキーイベントの両経路に同じ境界判定を適用します
+- `Esc`によるKVM解除は境界外でも引き続き利用できます
+
+### 4-5. ターゲットPCを含む実機検証
+
+最初はターゲットPCをプライマリ単一画面にし、空のデスクトップや白紙キャンバスで確認してください。
+
+1. ターゲットPCでBP2が`046D:C52B`として列挙され、Keyboard / Relative Mouse / Absolute Mouseに警告がないことを確認する
+2. simple-kvmのステータスが`Connected: <COM> | FPS: <値>`になることを確認する
+3. 映像の中央と周辺をクリックし、ターゲットカーソルが先に同じ位置へ移動してからクリックされることを確認する
+4. 高速移動後、最終位置へ収束して古い位置へ戻らないことを確認する
+5. simple-kvm内でターゲットへキー入力できることを確認する
+6. カーソルをホスト側の別ウィンドウへ移して入力し、ターゲットへ同じキーが送られないことを確認する
+7. Shiftなどを押したままカーソルを外へ出し、ターゲット側でキーが押しっぱなしにならないことを確認する
+
+2026-09-02時点で、BP1をホストPC、BP2をWindowsターゲットPCへ接続し、HDMI映像をホストへ戻す構成で、driverless HID列挙、絶対座標移動とクリック、カーソル境界によるキーボード転送停止・解放を実機確認済みです。同一ホストの`tools/hardware_loopback.py`では、5地点の座標、`move -> down -> up`、高速な200座標入力のlatest-wins、約2.5秒の無通信時ボタン解放が`LOOPBACK_E2E_PASS`になっています。
+
+multi-monitor、mixed DPI、non-primary monitor captureはこの確認範囲に含みません。
 
 ---
 
@@ -196,8 +221,9 @@ python main.py
 ### KVM フォーカスモードの使い方
 
 - VideoWidget（映像エリア）をクリック → KVM フォーカスモード ON
-  - マウスカーソルが非表示になります
-  - キーボード・マウス操作がターゲット PC へ転送されます
+  - Relative / Hybridではマウスカーソルを非表示にして中央へ固定します
+  - Absoluteではカーソルを表示したまま、映像内の位置をターゲットの絶対座標へ送ります
+  - 物理キーボードはカーソルがsimple-kvmウィンドウ内にある場合だけ転送します
 - **Esc キー** を押す → フォーカスモード解除
 
 ### 全画面表示の使い方
@@ -228,6 +254,7 @@ python main.py
 
 - File → Settings の「Mouse Speed」スライダーで調整
 - スライダーを右に動かすほどカーソルが速く動きます
+- Relative / Hybridだけに適用され、Absoluteの座標には適用されません
 - 設定値は即座に反映され、次回起動時も維持されます
 
 ### Amical音声入力の転送
@@ -246,7 +273,7 @@ AmicalがホストPC上で生成した日本語の文字起こしを、ローマ
 - 英数字とスペースだけを送信し、句読点や記号は除外します
 - Enterは自動送信しません
 - ターゲットPC側の受信ヘルパーやIMEは不要です
-- Esc、KVMフォーカス解除、切断、または新しいF9操作で送信中の文章をキャンセルできます
+- Esc、KVMフォーカス解除、カーソルのウィンドウ外移動、切断、または新しいF9操作で送信中の文章をキャンセルできます
 - Amicalを使わない場合は設定をオフにするとF9が通常どおりターゲットへ転送されます
 
 ### クリップボードテキストのBase64送信
@@ -287,8 +314,10 @@ AmicalがホストPC上で生成した日本語の文字起こしを、ローマ
 | COM ポートが見えない | BP1 の USB ケーブルを抜き差し。ビルドフラグ `PIO_FRAMEWORK_ARDUINO_ENABLE_CDC` が有効か確認 |
 | ターゲット PC で HID が認識されない | BP2 のビルドフラグ `USBD_USE_HID_COMPOSITE` が有効か確認。書き込み後 3 秒間のエニュメレーション待機が完了するまで待つ |
 | BP2 が Code 43（無効なデバイス記述子）になる | BP2をクリーンビルドし、上記3件の `Weakened framework USB object` が表示された修正版を書き込む。正常時は `046D:C52B` の MI_00〜MI_02 が列挙される |
-| 映像が表示されない | Device インデックスを変更して試す。他のカメラアプリを終了する |
+| 映像が表示されない | Settingsで正しいDirectShowデバイス名を選び、他のカメラアプリを終了する |
 | キー入力が届かない | UART クロス接続（PA9↔PA10）を確認 |
+| ホスト側の別ウィンドウへ入力するとターゲットにも入力される | Absoluteモード対応版のクライアントか確認。物理キー転送はカーソルがsimple-kvmウィンドウ内にある場合だけ有効 |
+| カーソルをsimple-kvm外へ出した後、ターゲットのキーが押しっぱなしになる | クライアントを最新版へ更新。境界を出た時点で全キー解放レポートが送られることを確認 |
 | Amicalの文章が転送されない | Input → Amical Romaji Forwardingがオンか、KVMフォーカス中か、シリアル接続済みかを確認 |
 | Base64の `+` や `=` が別の文字になる | Send Clipboard as Base64ダイアログで、ターゲットPCと同じJapanese (JIS)／US配列を選ぶ |
 | Base64送信を中断した後に復号できない | 途中までの受信バッファを破棄し、最初から再送する |
