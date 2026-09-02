@@ -120,6 +120,12 @@ class InputState:
     # Reset
     # ------------------------------------------------------------------
 
+    def clear_keyboard(self) -> None:
+        """Release all keyboard keys and modifiers, preserving mouse state."""
+        with self._lock:
+            self.pressed_keys.clear()
+            self.modifier = 0
+
     def clear_keys(self) -> None:
         """Release all keys, modifiers, and buttons (e.g. when focus is lost)."""
         with self._lock:

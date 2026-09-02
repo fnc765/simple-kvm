@@ -4,16 +4,21 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 
 from core.mouse_modes import MouseMode
+from core.keyboard_layouts import KeyboardLayout
 from core.settings_values import (
+    DEFAULT_BASE64_KEYBOARD_LAYOUT,
     DEFAULT_MOUSE_MODE,
     DEFAULT_FIRMWARE_ABS_SUPPORTED,
     DEFAULT_AMICAL_ROMAJI_ENABLED,
+    BASE64_KEYBOARD_LAYOUT_KEY,
     MOUSE_MODE_KEY,
     FIRMWARE_ABS_KEY,
     AMICAL_ROMAJI_ENABLED_KEY,
+    read_base64_keyboard_layout_setting,
     read_amical_romaji_enabled_setting,
     read_mouse_mode_setting,
     read_firmware_abs_setting,
+    write_base64_keyboard_layout_setting,
     write_mouse_mode_setting,
     write_firmware_abs_setting,
     write_amical_romaji_enabled_setting,
@@ -30,6 +35,7 @@ def test_defaults_are_safe():
     assert DEFAULT_MOUSE_MODE is MouseMode.RELATIVE
     assert DEFAULT_FIRMWARE_ABS_SUPPORTED is False
     assert DEFAULT_AMICAL_ROMAJI_ENABLED is False
+    assert DEFAULT_BASE64_KEYBOARD_LAYOUT is KeyboardLayout.JIS
 
 
 def test_setting_keys_are_namespaced():
@@ -37,6 +43,7 @@ def test_setting_keys_are_namespaced():
     assert MOUSE_MODE_KEY.startswith("input/")
     assert FIRMWARE_ABS_KEY.startswith("input/")
     assert AMICAL_ROMAJI_ENABLED_KEY.startswith("input/")
+    assert BASE64_KEYBOARD_LAYOUT_KEY.startswith("input/")
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +144,27 @@ def test_write_and_read_amical_romaji_enabled_roundtrip():
     write_amical_romaji_enabled_setting(s, False)
     assert s._data[AMICAL_ROMAJI_ENABLED_KEY] == "false"
     assert read_amical_romaji_enabled_setting(s) is False
+
+
+def test_base64_keyboard_layout_defaults_validates_and_roundtrips():
+    settings = _DictSettings()
+    assert read_base64_keyboard_layout_setting(settings) is KeyboardLayout.JIS
+
+    for value, expected in (
+        ("jis", KeyboardLayout.JIS),
+        ("JIS", KeyboardLayout.JIS),
+        ("us", KeyboardLayout.US),
+        (KeyboardLayout.US, KeyboardLayout.US),
+    ):
+        settings = _DictSettings({BASE64_KEYBOARD_LAYOUT_KEY: value})
+        assert read_base64_keyboard_layout_setting(settings) is expected
+
+    settings = _DictSettings({BASE64_KEYBOARD_LAYOUT_KEY: "unknown"})
+    assert read_base64_keyboard_layout_setting(settings) is KeyboardLayout.JIS
+
+    write_base64_keyboard_layout_setting(settings, KeyboardLayout.US)
+    assert settings._data[BASE64_KEYBOARD_LAYOUT_KEY] == "us"
+    assert read_base64_keyboard_layout_setting(settings) is KeyboardLayout.US
 
 
 # ---------------------------------------------------------------------------

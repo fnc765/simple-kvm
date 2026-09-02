@@ -5,12 +5,14 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
-from threading import Event
 
 from pykakasi import kakasi
 
-from core.protocol import build_keyboard_report
-from core.serial_comm import PacketSequence, PacketStep
+from core.hid_typing import (
+    DEFAULT_HID_REPORT_DELAY_MS,
+    ascii_char_to_hid,
+    build_ascii_typing_sequence,
+)
 
 
 AMICAL_F9_SCANCODE = 0x43
@@ -19,7 +21,6 @@ INJECTED_CONTROL_VK = 0x11
 INJECTED_V_VK = 0x56
 
 DEFAULT_PASTE_TIMEOUT_SECONDS = 15.0
-DEFAULT_HID_REPORT_DELAY_MS = 10
 MAX_ROMAJI_CHARACTERS = 1_000
 
 _ASCII_WORD_RE = re.compile(r"[A-Za-z0-9]+")
@@ -127,59 +128,4 @@ def romanize_for_hid(
         source_length=len(source),
         dropped_symbols=dropped_symbols,
         truncated=truncated,
-    )
-
-
-def ascii_char_to_hid(char: str) -> tuple[int, int] | None:
-    """Map one supported ASCII character to ``(modifier, HID usage)``."""
-    if len(char) != 1:
-        raise ValueError("expected exactly one character")
-    if "a" <= char <= "z":
-        return 0, 0x04 + ord(char) - ord("a")
-    if "A" <= char <= "Z":
-        return 0x02, 0x04 + ord(char) - ord("A")  # Left Shift
-    if "1" <= char <= "9":
-        return 0, 0x1E + ord(char) - ord("1")
-    if char == "0":
-        return 0, 0x27
-    if char == " ":
-        return 0, 0x2C
-    return None
-
-
-def build_ascii_typing_sequence(
-    text: str,
-    *,
-    report_delay_ms: int = DEFAULT_HID_REPORT_DELAY_MS,
-    cancel_event: Event | None = None,
-) -> PacketSequence:
-    """Build an atomic press/release sequence for an ASCII transcript."""
-    if report_delay_ms < 0:
-        raise ValueError("report delay cannot be negative")
-
-    strokes: list[tuple[int, int]] = []
-    for char in text:
-        stroke = ascii_char_to_hid(char)
-        if stroke is None:
-            raise ValueError("text must contain only supported ASCII characters")
-        strokes.append(stroke)
-    if not strokes:
-        raise ValueError("text must contain only supported ASCII characters")
-
-    released = build_keyboard_report(0, [])
-    steps = [PacketStep(released, report_delay_ms)]
-    for modifier, usage in strokes:
-        steps.append(
-            PacketStep(
-                build_keyboard_report(modifier, [usage]),
-                report_delay_ms,
-            )
-        )
-        steps.append(PacketStep(released, report_delay_ms))
-    steps.append(PacketStep(released, 0))
-
-    return PacketSequence(
-        tuple(steps),
-        cleanup_data=released,
-        cancel_event=cancel_event,
     )

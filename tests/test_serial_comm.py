@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 from core.serial_comm import (  # noqa: E402
     PacketSequence,
     PacketStep,
+    SequenceOutcome,
     SerialComm,
     _write_queue_item,
 )
@@ -118,10 +119,57 @@ def test_cancelled_sequence_stops_and_sends_cleanup():
         cancel_event=cancel,
     )
 
-    _write_queue_item(fake, sequence, sleeper=cancel_after_first_step)
+    outcome = _write_queue_item(
+        fake,
+        sequence,
+        sleeper=cancel_after_first_step,
+    )
 
     assert sleeps == [0.010]
     assert fake.writes == [b"press", b"cleanup"]
+    assert outcome is SequenceOutcome.CANCELLED
+
+
+def test_tracked_sequence_reports_completed_units_after_successful_writes():
+    fake = FakeSerial()
+    progress = []
+    sequence = PacketSequence(
+        (
+            PacketStep(b"press-a"),
+            PacketStep(b"release-a", progress_units=1),
+            PacketStep(b"press-b"),
+            PacketStep(b"release-b", progress_units=1),
+        ),
+        transfer_id="transfer-1",
+        progress_total=2,
+    )
+
+    outcome = _write_queue_item(
+        fake,
+        sequence,
+        sleeper=lambda _seconds: None,
+        on_progress=lambda completed, total: progress.append(
+            (completed, total)
+        ),
+    )
+
+    assert outcome is SequenceOutcome.COMPLETED
+    assert progress == [(1, 2), (2, 2)]
+    assert fake.writes == [
+        b"press-a",
+        b"release-a",
+        b"press-b",
+        b"release-b",
+    ]
+
+
+def test_tracked_sequence_rejects_inconsistent_progress_metadata():
+    with pytest.raises(ValueError, match="progress total"):
+        PacketSequence(
+            (PacketStep(b"release", progress_units=1),),
+            transfer_id="transfer-1",
+            progress_total=2,
+        )
 
 
 def test_stop_wait_budget_covers_a_complete_three_write_sequence():
@@ -143,3 +191,37 @@ def test_stop_wait_budget_covers_a_complete_three_write_sequence():
 
     assert comm.interruption_requested is True
     assert comm.waited_ms >= 4_100
+
+
+def test_absolute_motion_is_latest_wins_in_one_priority_slot():
+    comm = SerialComm()
+
+    assert comm.enqueue_mouse_motion(b"old-position") is True
+    assert comm.enqueue_mouse_motion(b"new-position") is True
+    assert comm._mouse_priority.qsize() == 1
+
+    assert comm._next_queue_item() == b"new-position"
+
+
+def test_mouse_transition_cancels_stale_motion_and_stays_fifo():
+    comm = SerialComm()
+    first = PacketSequence((PacketStep(b"move"), PacketStep(b"down")))
+    second = PacketSequence((PacketStep(b"held"), PacketStep(b"up")))
+
+    comm.enqueue_mouse_motion(b"stale-motion")
+    assert comm.enqueue_mouse_transition(first) is True
+    assert comm.enqueue_mouse_transition(second) is True
+
+    assert comm._next_queue_item() == first
+    assert comm._next_queue_item() == second
+
+
+def test_mouse_transition_is_not_rejected_when_normal_queue_is_full():
+    comm = SerialComm()
+    comm._queue = queue.Queue(maxsize=1)
+    comm._queue.put_nowait(b"ordinary-traffic")
+    transition = PacketSequence((PacketStep(b"down"), PacketStep(b"up")))
+
+    assert comm.enqueue_mouse_transition(transition) is True
+    assert comm._next_queue_item() == transition
+    assert comm._queue.get_nowait() == b"ordinary-traffic"

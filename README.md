@@ -16,7 +16,7 @@ BluePill × 2 + Python GUI による DIY KVM スイッチです。
   │                           UART (115200 bps)
   │                              │
   │                              ▼
-  │                       [BluePill #2] ──► USB (HID Keyboard + Mouse) ──► [ターゲット PC]
+  │                       [BluePill #2] ──► USB (Keyboard + Relative/Absolute Mouse) ──► [ターゲット PC]
   │                                                                               │
   └─ USB (UVC) ◄── [HDMI キャプチャドングル] ◄──────── HDMI ────────────────────┘
 ```
@@ -42,12 +42,16 @@ simple-kvm/
 │   ├── requirements.txt
 │   ├── core/
 │   │   ├── amical_bridge.py # Amical音声入力→ローマ字HID変換
-│   │   ├── capture.py      # OpenCV キャプチャスレッド
+│   │   ├── capture.py      # PyAV / FFmpegキャプチャスレッド
+│   │   ├── clipboard_base64.py # クリップボード文字列→Base64変換
+│   │   ├── hid_typing.py   # 生成文字列→連続HIDキー入力
 │   │   ├── input_hook.py   # 入力状態管理
+│   │   ├── keyboard_layouts.py # Base64送信用JIS/US配列定義
 │   │   ├── keymap.py       # Qt.Key → HID Usage ID 変換
 │   │   ├── protocol.py     # パケットエンコーダ
 │   │   └── serial_comm.py  # シリアル通信スレッド
 │   └── ui/
+│       ├── base64_transfer_dialog.py # Base64送信進捗・中断UI
 │       ├── mainwindow.py   # メインウィンドウ
 │       └── settings_dialog.py
 ├── docs/
@@ -80,25 +84,27 @@ simple-kvm/
 #### ソースから実行（開発者向け）
 
 ```powershell
-cd app
 python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-python main.py
+.venv\Scripts\python.exe -m pip install -e .
+.venv\Scripts\python.exe -m app
 ```
 
 1. File → Settings で COM ポートとキャプチャデバイスを選択
-   - **Detect Formats** ボタンでデバイスが対応する解像度・fps の組み合わせを一覧表示し、手動で選択できます
-2. 映像エリアをクリックすると **KVM フォーカスモード** に入ります
-3. **Esc** キーでフォーカスを解除します
-4. **F11** キー / **View → Toggle Fullscreen** / 映像エリアの**ダブルクリック** で全画面表示に切り替えられます
+2. Phase 3 BP2 firmwareを使う場合は **Mouse Mode: Absolute** と **Firmware supports absolute HID** を有効にします
+3. 映像エリアをクリックすると **KVM フォーカスモード** に入ります
+4. **Esc** キーでフォーカスを解除します
+5. **F11** キー / **View → Toggle Fullscreen** / 映像エリアの**ダブルクリック** で全画面表示に切り替えられます
    - 全画面中も Esc でフォーカス解除 → もう一度 Esc で全画面解除（2段階）
    - 全画面解除時に元のウィンドウサイズ・位置が復元されます
-5. ターゲットへ特殊キーを送る場合は、Esc でKVMフォーカスを解除してから **Input → Send Special Keys** で目的のキーを選択します
+6. ターゲットへ特殊キーを送る場合は、Esc でKVMフォーカスを解除してから **Input → Send Special Keys** で目的のキーを選択します
    - この機能は既存のキーボードHIDレポートを使用するため、BluePillファームウェアの更新は不要です
-6. Amical音声入力を転送する場合は **Input → Amical Romaji Forwarding** をオンにします
+7. Amical音声入力を転送する場合は **Input → Amical Romaji Forwarding** をオンにします
    - KVMフォーカス中にF9を押して話し、離すと、日本語の文字起こしがローマ字としてターゲットへ入力されます
    - Enterは自動送信されません。内容を確認して手動で送信してください
+8. クリップボードのテキストを標準Base64として送る場合は、EscでKVMフォーカスを解除してから **Input → Send Clipboard as Base64…** を選びます
+   - UTF-8化したテキストのBase64本文だけを入力し、Enterや開始・終了マーカーは追加しません
+   - ターゲットの配列に合わせて **Japanese (JIS)** または **US** を選びます（既定はJIS、選択は次回も保持）
+   - ダイアログで送信率を確認でき、送信途中で中断できます
 
 ---
 
@@ -106,8 +112,7 @@ python main.py
 
 - **ウィンドウリサイズ対応**: ウィンドウサイズに合わせて映像が自動的にスケールされます
 - **HiDPI (高DPI) 対応**: Windows のディスプレイスケーリング設定（125%/150%/200% 等）に対応し、鮮明な映像を表示します
-- **映像品質**: キャプチャに MJPEG フォーマットを使用し、1920×1080 で利用可能な最高 fps を自動選択します
-- **キャプチャフォーマット選択**: Settings の「Detect Formats」ボタンでデバイスが対応する解像度×fps の組み合わせを一覧表示し、手動で選択できます
+- **映像品質**: PyAV / FFmpeg の DirectShow 入力を使用し、1920×1080 @ 30 fps でキャプチャします
 - **全画面表示 (Fullscreen)**:
   - F11 キー / View → Toggle Fullscreen / 映像エリアのダブルクリックで全画面切替
   - 全画面時はメニューバー・ステータスバーが非表示になり、FPS が左上にオーバーレイ表示されます
@@ -121,16 +126,37 @@ python main.py
   - BIOS / ブートメニュー: Delete、F2、F12
 - **Amicalローマ字転送**: AmicalのF9音声入力結果をホスト側でローマ字化し、英数字とスペースのHIDキー入力としてターゲットへ送信します。ターゲット側の受信ソフトやIMEは不要です
   - F9を離してから15秒以内に届いたAmicalの貼り付けを処理し、1回につき最大1,000文字を送信します
-- **マウスモード切替** (Phase 1〜2 ホスト側のみ): Settings ダイアログの「Mouse Mode」で以下を選択できます
+- **クリップボードBase64送信**: クリップボードのプレーンテキスト全体をUTF-8の標準Base64へ変換し、Base64本文だけをHIDキー入力として送ります
+  - 送信前に元文字数、UTF-8バイト数、Base64文字数、概算時間を表示します
+  - 送信中は、COMへ押下・解放レポートを書き終えたBase64文字数をパーセント表示します。100%はクライアント側の受信ACKを意味しません
+  - 中断時は全キー解放レポートを送り、途中までのBase64はクライアント側で破棄する前提です
+  - 送信ダイアログでJapanese (JIS)／US配列を選択できます。既定はJISで、最後の選択を設定に保存します
+  - 配列選択で変わるのは標準Base64中の `+` と `=` のHIDキー割り当てだけで、送るBase64本文自体は変わりません
+- **マウスモード切替**: Settings ダイアログの「Mouse Mode」で以下を選択できます
   - **Relative** (既定): 既存挙動。カーソルを画面中央へ固定し相対 dx/dy を送る
   - **Hybrid**: KVM 開始時に VideoWidget 上のクリック座標へターゲットカーソルをジャンプさせた後、Relative と同じ動作
   - **Absolute**: VideoWidget 内のホストカーソル位置をそのままターゲット PC の絶対座標として送信
+    - KVM を開始したシングルクリックは、同じ絶対座標への `移動 → 押下 → 解放` として転送します
+    - 連続移動は最新座標へ集約し、押下・解放は順序を保って送るため、古い移動の滞留やボタン状態の取りこぼしを抑えます
+    - ホストカーソルは中央へ固定せず、KVM 有効中も simple-kvm の外へ移動できます
+    - 物理キーボード入力はカーソルが simple-kvm ウィンドウ内にある間だけターゲットへ転送し、ウィンドウを出た時点でターゲット側のキー状態を解放します。KVM とマウスの有効状態は維持されます
   - **「Firmware supports absolute HID」** チェックボックス: 旧ファームウェア (Phase 1〜2) ではオフのまま。Phase 3 firmware を書き込んだ BP2 を使うときだけオンにする
 - **設定の永続化**: COM ポート、キャプチャデバイス、アスペクト比、マウス速度、マウスモード、ファームウェア abs サポート設定は自動的に保存され、次回起動時に復元されます。起動時に前回のデバイスが存在すれば自動接続されます
 
-> **Note**: `Hybrid` / `Absolute` モードを使うには **Phase 3 firmware** が BP2 に書き込まれている必要があります。Phase 1〜2 の現行 firmware では「Firmware supports absolute HID」をオンにしないでください（unknown packet としてエラーブリンクします）。Phase 3 firmware は別 PR で提供予定です。
+> **Note**: `Hybrid` / `Absolute` モードを使うには、このリポジトリの **Phase 3 firmware** を BP2 に書き込む必要があります。Phase 1〜2 の旧 firmware では「Firmware supports absolute HID」をオンにしないでください（unknown packet としてエラーブリンクします）。
 
 > **SteamVR / OVR 対応**: `Absolute` モードは SteamVR Desktop dashboard (VR 内に Windows desktop を映す機能) での操作性を改善します。OVR Advanced Settings (OVRAS) の VR 内ダッシュボードオーバーレイは OpenVR overlay event 経路で動作するため、本プロジェクトの HID-only 範囲では完全対応しません。
+
+### Absolute HIDの検証済み範囲
+
+2026-09-02時点で、Windowsホスト + BP1、Windowsターゲット + BP2、HDMIキャプチャの実機構成で以下を確認済みです。
+
+- BP2が専用ドライバなしでKeyboard / Relative Mouse / Absolute Mouseとして正常列挙され、Code 43にならない
+- 映像上の座標へターゲットカーソルが追従し、KVM開始クリックが同じ座標で `移動 → 押下 → 解放` の順に実行される
+- Absoluteモードではホストカーソルをsimple-kvm外へ移動できる
+- 物理キーボードはカーソルがsimple-kvmウィンドウ内にある間だけターゲットへ転送され、境界を出ると押下中のキーが解放される
+
+同一ホストの自動ループバックでは、5地点の座標、クリック順序、高速な200座標入力が最終座標へ収束するlatest-wins、約2.5秒の無通信時ボタン解放も `LOOPBACK_E2E_PASS` まで確認しています。初期サポート範囲はターゲットのプライマリ単一画面です。multi-monitor、mixed DPI、non-primary captureは未検証です。
 
 ---
 
