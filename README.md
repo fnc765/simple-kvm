@@ -16,7 +16,7 @@ BluePill × 2 + Python GUI による DIY KVM スイッチです。
   │                           UART (115200 bps)
   │                              │
   │                              ▼
-  │                       [BluePill #2] ──► USB (HID Keyboard + Mouse) ──► [ターゲット PC]
+  │                       [BluePill #2] ──► USB (Keyboard + Relative/Absolute Mouse) ──► [ターゲット PC]
   │                                                                               │
   └─ USB (UVC) ◄── [HDMI キャプチャドングル] ◄──────── HDMI ────────────────────┘
 ```
@@ -42,7 +42,7 @@ simple-kvm/
 │   ├── requirements.txt
 │   ├── core/
 │   │   ├── amical_bridge.py # Amical音声入力→ローマ字HID変換
-│   │   ├── capture.py      # OpenCV キャプチャスレッド
+│   │   ├── capture.py      # PyAV / FFmpegキャプチャスレッド
 │   │   ├── clipboard_base64.py # クリップボード文字列→Base64変換
 │   │   ├── hid_typing.py   # 生成文字列→連続HIDキー入力
 │   │   ├── input_hook.py   # 入力状態管理
@@ -84,26 +84,24 @@ simple-kvm/
 #### ソースから実行（開発者向け）
 
 ```powershell
-cd app
 python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-python main.py
+.venv\Scripts\python.exe -m pip install -e .
+.venv\Scripts\python.exe -m app
 ```
 
 1. File → Settings で COM ポートとキャプチャデバイスを選択
-   - **Detect Formats** ボタンでデバイスが対応する解像度・fps の組み合わせを一覧表示し、手動で選択できます
-2. 映像エリアをクリックすると **KVM フォーカスモード** に入ります
-3. **Esc** キーでフォーカスを解除します
-4. **F11** キー / **View → Toggle Fullscreen** / 映像エリアの**ダブルクリック** で全画面表示に切り替えられます
+2. Phase 3 BP2 firmwareを使う場合は **Mouse Mode: Absolute** と **Firmware supports absolute HID** を有効にします
+3. 映像エリアをクリックすると **KVM フォーカスモード** に入ります
+4. **Esc** キーでフォーカスを解除します
+5. **F11** キー / **View → Toggle Fullscreen** / 映像エリアの**ダブルクリック** で全画面表示に切り替えられます
    - 全画面中も Esc でフォーカス解除 → もう一度 Esc で全画面解除（2段階）
    - 全画面解除時に元のウィンドウサイズ・位置が復元されます
-5. ターゲットへ特殊キーを送る場合は、Esc でKVMフォーカスを解除してから **Input → Send Special Keys** で目的のキーを選択します
+6. ターゲットへ特殊キーを送る場合は、Esc でKVMフォーカスを解除してから **Input → Send Special Keys** で目的のキーを選択します
    - この機能は既存のキーボードHIDレポートを使用するため、BluePillファームウェアの更新は不要です
-6. Amical音声入力を転送する場合は **Input → Amical Romaji Forwarding** をオンにします
+7. Amical音声入力を転送する場合は **Input → Amical Romaji Forwarding** をオンにします
    - KVMフォーカス中にF9を押して話し、離すと、日本語の文字起こしがローマ字としてターゲットへ入力されます
    - Enterは自動送信されません。内容を確認して手動で送信してください
-7. クリップボードのテキストを標準Base64として送る場合は、EscでKVMフォーカスを解除してから **Input → Send Clipboard as Base64…** を選びます
+8. クリップボードのテキストを標準Base64として送る場合は、EscでKVMフォーカスを解除してから **Input → Send Clipboard as Base64…** を選びます
    - UTF-8化したテキストのBase64本文だけを入力し、Enterや開始・終了マーカーは追加しません
    - ターゲットの配列に合わせて **Japanese (JIS)** または **US** を選びます（既定はJIS、選択は次回も保持）
    - ダイアログで送信率を確認でき、送信途中で中断できます
@@ -114,8 +112,7 @@ python main.py
 
 - **ウィンドウリサイズ対応**: ウィンドウサイズに合わせて映像が自動的にスケールされます
 - **HiDPI (高DPI) 対応**: Windows のディスプレイスケーリング設定（125%/150%/200% 等）に対応し、鮮明な映像を表示します
-- **映像品質**: キャプチャに MJPEG フォーマットを使用し、1920×1080 で利用可能な最高 fps を自動選択します
-- **キャプチャフォーマット選択**: Settings の「Detect Formats」ボタンでデバイスが対応する解像度×fps の組み合わせを一覧表示し、手動で選択できます
+- **映像品質**: PyAV / FFmpeg の DirectShow 入力を使用し、1920×1080 @ 30 fps でキャプチャします
 - **全画面表示 (Fullscreen)**:
   - F11 キー / View → Toggle Fullscreen / 映像エリアのダブルクリックで全画面切替
   - 全画面時はメニューバー・ステータスバーが非表示になり、FPS が左上にオーバーレイ表示されます
@@ -149,6 +146,17 @@ python main.py
 > **Note**: `Hybrid` / `Absolute` モードを使うには、このリポジトリの **Phase 3 firmware** を BP2 に書き込む必要があります。Phase 1〜2 の旧 firmware では「Firmware supports absolute HID」をオンにしないでください（unknown packet としてエラーブリンクします）。
 
 > **SteamVR / OVR 対応**: `Absolute` モードは SteamVR Desktop dashboard (VR 内に Windows desktop を映す機能) での操作性を改善します。OVR Advanced Settings (OVRAS) の VR 内ダッシュボードオーバーレイは OpenVR overlay event 経路で動作するため、本プロジェクトの HID-only 範囲では完全対応しません。
+
+### Absolute HIDの検証済み範囲
+
+2026-09-02時点で、Windowsホスト + BP1、Windowsターゲット + BP2、HDMIキャプチャの実機構成で以下を確認済みです。
+
+- BP2が専用ドライバなしでKeyboard / Relative Mouse / Absolute Mouseとして正常列挙され、Code 43にならない
+- 映像上の座標へターゲットカーソルが追従し、KVM開始クリックが同じ座標で `移動 → 押下 → 解放` の順に実行される
+- Absoluteモードではホストカーソルをsimple-kvm外へ移動できる
+- 物理キーボードはカーソルがsimple-kvmウィンドウ内にある間だけターゲットへ転送され、境界を出ると押下中のキーが解放される
+
+同一ホストの自動ループバックでは、5地点の座標、クリック順序、高速な200座標入力が最終座標へ収束するlatest-wins、約2.5秒の無通信時ボタン解放も `LOOPBACK_E2E_PASS` まで確認しています。初期サポート範囲はターゲットのプライマリ単一画面です。multi-monitor、mixed DPI、non-primary captureは未検証です。
 
 ---
 
