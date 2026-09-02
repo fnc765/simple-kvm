@@ -831,6 +831,29 @@ class MainWindow(QMainWindow):
     # Focus / KVM active mode
     # -------------------------------------------------------------------------
 
+    def _keyboard_forwarding_allowed(self) -> bool:
+        """Return whether physical keyboard input may reach the target.
+
+        Absolute mouse mode intentionally lets the host cursor leave this
+        window without deactivating KVM mode.  Raw Input can still arrive while
+        another application has focus, so window focus alone is not a safe
+        keyboard-forwarding boundary.
+        """
+        return (
+            self._kvm_active
+            and self.isVisible()
+            and self.frameGeometry().contains(QCursor.pos())
+        )
+
+    def _release_forwarded_keyboard(self) -> None:
+        """Release target keyboard state without disturbing mouse/KVM state."""
+        modifier, keys = self._input_state.get_keyboard_report()
+        had_pressed_keys = bool(modifier or any(keys))
+        self._input_state.clear_keyboard()
+        self._reset_amical_flow(cancel_typing=True)
+        if had_pressed_keys:
+            self._serial.enqueue(build_keyboard_report(0, []))
+
     def _set_kvm_active(self, active: bool) -> None:
         if active and self._base64_transfer_id is not None:
             return
@@ -1362,13 +1385,16 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------------
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        keyboard_allowed = self._keyboard_forwarding_allowed()
+
         # Amical's Windows helper injects a scan-code-zero Ctrl+V after F9.
         # Capture it before the Raw Input duplicate-suppression return below.
-        if self._handle_amical_key_press(event):
+        if keyboard_allowed and self._handle_amical_key_press(event):
             return
 
         if (
-            self._amical_enabled
+            keyboard_allowed
+            and self._amical_enabled
             and self._kvm_active
             and not self._use_raw_input
             and event.key() == Qt.Key.Key_F9
@@ -1397,11 +1423,18 @@ class MainWindow(QMainWindow):
         # When Raw Input is active, skip Qt keyboard events entirely
         # to avoid double-sending every keystroke.
         if self._use_raw_input and self._kvm_active:
+            if not keyboard_allowed:
+                self._release_forwarded_keyboard()
             return
 
         key = event.key()
 
         if not self._kvm_active:
+            super().keyPressEvent(event)
+            return
+
+        if not keyboard_allowed:
+            self._release_forwarded_keyboard()
             super().keyPressEvent(event)
             return
 
@@ -1421,11 +1454,14 @@ class MainWindow(QMainWindow):
             self._serial.enqueue(build_keyboard_report(modifier, keys))
 
     def keyReleaseEvent(self, event: QKeyEvent) -> None:  # noqa: N802
-        if self._handle_amical_key_release(event):
+        keyboard_allowed = self._keyboard_forwarding_allowed()
+
+        if keyboard_allowed and self._handle_amical_key_release(event):
             return
 
         if (
-            self._amical_enabled
+            keyboard_allowed
+            and self._amical_enabled
             and self._kvm_active
             and not self._use_raw_input
             and event.key() == Qt.Key.Key_F9
@@ -1436,9 +1472,16 @@ class MainWindow(QMainWindow):
 
         # When Raw Input is active, skip Qt keyboard events.
         if self._use_raw_input and self._kvm_active:
+            if not keyboard_allowed:
+                self._release_forwarded_keyboard()
             return
 
         if not self._kvm_active:
+            super().keyReleaseEvent(event)
+            return
+
+        if not keyboard_allowed:
+            self._release_forwarded_keyboard()
             super().keyReleaseEvent(event)
             return
 
@@ -1506,14 +1549,6 @@ class MainWindow(QMainWindow):
         if not self._kvm_active:
             return
 
-        if (
-            self._amical_enabled
-            and scancode == AMICAL_F9_SCANCODE
-            and vk == AMICAL_F9_VK
-        ):
-            self._begin_amical_f9()
-            return
-
         # Escape handling with fullscreen awareness
         if scancode == 0x01:  # Esc
             if self._is_fullscreen:
@@ -1525,6 +1560,18 @@ class MainWindow(QMainWindow):
                     self.toggle_fullscreen()
             else:
                 self._set_kvm_active(False)
+            return
+
+        if not self._keyboard_forwarding_allowed():
+            self._release_forwarded_keyboard()
+            return
+
+        if (
+            self._amical_enabled
+            and scancode == AMICAL_F9_SCANCODE
+            and vk == AMICAL_F9_VK
+        ):
+            self._begin_amical_f9()
             return
 
         # Modifier keys: use VK → modifier bit (full L/R discrimination)
@@ -1555,6 +1602,9 @@ class MainWindow(QMainWindow):
         """Raw Input keyboard release callback."""
         if not self._kvm_active:
             return
+        if not self._keyboard_forwarding_allowed():
+            self._release_forwarded_keyboard()
+            return
         if (
             self._amical_enabled
             and scancode == AMICAL_F9_SCANCODE
@@ -1578,6 +1628,12 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------------
     # Focus / close
     # -------------------------------------------------------------------------
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        """Stop keyboard forwarding as soon as the cursor leaves the window."""
+        if self._kvm_active:
+            self._release_forwarded_keyboard()
+        super().leaveEvent(event)
 
     def focusOutEvent(self, event) -> None:  # noqa: N802
         self._set_kvm_active(False)

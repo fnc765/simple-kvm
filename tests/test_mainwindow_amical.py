@@ -28,7 +28,13 @@ def _window(tmp_path, monkeypatch):
 
     monkeypatch.setattr("ui.mainwindow.SerialComm.start", unexpected_start)
     monkeypatch.setattr("ui.mainwindow.CaptureThread.start", unexpected_start)
-    return MainWindow(settings=settings, auto_connect=False)
+    window = MainWindow(settings=settings, auto_connect=False)
+    monkeypatch.setattr(
+        window,
+        "_keyboard_forwarding_allowed",
+        lambda: window._kvm_active,
+    )
+    return window
 
 
 def _native_key(event_type, key, modifiers, vk, text=""):
