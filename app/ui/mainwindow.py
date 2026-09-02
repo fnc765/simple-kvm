@@ -75,6 +75,10 @@ from core.amical_bridge import (
     build_ascii_typing_sequence,
     romanize_for_hid,
 )
+from core.absolute_mouse import (
+    build_absolute_button_transition,
+    build_absolute_click,
+)
 from core.input_hook import InputState, RawInputHook
 from core.keymap import (
     get_modifier_bit,
@@ -300,6 +304,7 @@ class MainWindow(QMainWindow):
         # Click that initiated KVM focus, in widget-local coordinates.
         # Used by ``hybrid`` mode to compute the absolute jump target.
         self._pending_kvm_activation_widget_pos: QPoint | None = None
+        self._pending_kvm_activation_button: int = 0
         # Last absolute HID coordinate sent (for duplicate suppression).
         self._last_abs_x: int = -1
         self._last_abs_y: int = -1
@@ -504,6 +509,17 @@ class MainWindow(QMainWindow):
             # cursor snaps to the position the user just clicked on.
             if self._effective_mode is MouseMode.HYBRID and self._kvm_active:
                 self._send_hybrid_jump()
+            elif (
+                self._effective_mode is MouseMode.ABSOLUTE
+                and self._kvm_active
+            ):
+                # Absolute mode can safely forward the activation click:
+                # move -> down -> up at the remembered video coordinate.
+                # The 400 ms single/double-click discriminator has already
+                # expired, so a fullscreen double-click is never forwarded.
+                self._send_absolute_activation_click()
+        self._pending_kvm_activation_widget_pos = None
+        self._pending_kvm_activation_button = 0
 
     def _send_heartbeat(self) -> None:
         if (
@@ -815,6 +831,29 @@ class MainWindow(QMainWindow):
     # Focus / KVM active mode
     # -------------------------------------------------------------------------
 
+    def _keyboard_forwarding_allowed(self) -> bool:
+        """Return whether physical keyboard input may reach the target.
+
+        Absolute mouse mode intentionally lets the host cursor leave this
+        window without deactivating KVM mode.  Raw Input can still arrive while
+        another application has focus, so window focus alone is not a safe
+        keyboard-forwarding boundary.
+        """
+        return (
+            self._kvm_active
+            and self.isVisible()
+            and self.frameGeometry().contains(QCursor.pos())
+        )
+
+    def _release_forwarded_keyboard(self) -> None:
+        """Release target keyboard state without disturbing mouse/KVM state."""
+        modifier, keys = self._input_state.get_keyboard_report()
+        had_pressed_keys = bool(modifier or any(keys))
+        self._input_state.clear_keyboard()
+        self._reset_amical_flow(cancel_typing=True)
+        if had_pressed_keys:
+            self._serial.enqueue(build_keyboard_report(0, []))
+
     def _set_kvm_active(self, active: bool) -> None:
         if active and self._base64_transfer_id is not None:
             return
@@ -843,6 +882,18 @@ class MainWindow(QMainWindow):
                 f"mode: {self._effective_mode.value}{amical_part})"
             )
         else:
+            held_mouse_buttons = self._input_state.mouse_buttons
+            if (
+                held_mouse_buttons
+                and self._effective_mode is MouseMode.ABSOLUTE
+            ):
+                # Release the absolute interface before clearing local state.
+                # Sending only a zero report on the separate relative-mouse
+                # interface cannot release a button held by this collection.
+                self._send_absolute_button_transition(
+                    held_mouse_buttons,
+                    0,
+                )
             self._reset_amical_flow(cancel_typing=True)
             # Guard: do not touch menu bar when fullscreen (managed by fullscreen exit)
             if not self._is_fullscreen:
@@ -1013,9 +1064,13 @@ class MainWindow(QMainWindow):
                 # Remember where the user clicked so ``hybrid`` mode can
                 # jump the target cursor to the matching screen position.
                 self._pending_kvm_activation_widget_pos = local
+                self._pending_kvm_activation_button = self._mouse_button_bit(
+                    event.button()
+                )
                 self._kvm_click_timer.start(400)
             return
 
+        previous_buttons = self._input_state.mouse_buttons
         btn = event.button()
         if btn == Qt.MouseButton.LeftButton:
             self._input_state.set_mouse_button(0x01, True)
@@ -1025,7 +1080,12 @@ class MainWindow(QMainWindow):
             self._input_state.set_mouse_button(0x04, True)
 
         if self._effective_mode is MouseMode.ABSOLUTE:
-            self._send_absolute_mouse()
+            next_buttons = self._input_state.mouse_buttons
+            if next_buttons != previous_buttons:
+                self._send_absolute_button_transition(
+                    previous_buttons,
+                    next_buttons,
+                )
         else:
             self._serial.enqueue(
                 build_mouse_report(self._input_state.mouse_buttons, 0, 0)
@@ -1035,6 +1095,7 @@ class MainWindow(QMainWindow):
         if not self._kvm_active:
             return
 
+        previous_buttons = self._input_state.mouse_buttons
         btn = event.button()
         if btn == Qt.MouseButton.LeftButton:
             self._input_state.set_mouse_button(0x01, False)
@@ -1044,7 +1105,12 @@ class MainWindow(QMainWindow):
             self._input_state.set_mouse_button(0x04, False)
 
         if self._effective_mode is MouseMode.ABSOLUTE:
-            self._send_absolute_mouse()
+            next_buttons = self._input_state.mouse_buttons
+            if next_buttons != previous_buttons:
+                self._send_absolute_button_transition(
+                    previous_buttons,
+                    next_buttons,
+                )
         else:
             self._serial.enqueue(
                 build_mouse_report(self._input_state.mouse_buttons, 0, 0)
@@ -1053,6 +1119,8 @@ class MainWindow(QMainWindow):
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         """Double-click on video widget toggles fullscreen."""
         self._kvm_click_timer.stop()  # Cancel pending KVM activation
+        self._pending_kvm_activation_widget_pos = None
+        self._pending_kvm_activation_button = 0
         if not self._kvm_active:
             local = self._video_widget.mapFromGlobal(
                 event.globalPosition().toPoint()
@@ -1155,6 +1223,39 @@ class MainWindow(QMainWindow):
             self._aspect_setting,
         )
 
+    @staticmethod
+    def _mouse_button_bit(button: Qt.MouseButton) -> int:
+        """Return the HID bit for a Qt mouse button, or zero if unsupported."""
+        if button == Qt.MouseButton.LeftButton:
+            return 0x01
+        if button == Qt.MouseButton.RightButton:
+            return 0x02
+        if button == Qt.MouseButton.MiddleButton:
+            return 0x04
+        return 0
+
+    def _map_absolute_cursor(self, *, allow_outside: bool = False):
+        """Map the current host cursor, optionally clamping a drag to edges."""
+        from core.coordinates import map_widget_point_to_hid
+
+        try:
+            cursor_global = QCursor.pos()
+            local = self._video_widget.mapFromGlobal(cursor_global)
+        except Exception:
+            return None
+
+        inside = (
+            0 <= local.x() < self._video_widget.width()
+            and 0 <= local.y() < self._video_widget.height()
+        )
+        if not inside and not allow_outside:
+            return None
+        return map_widget_point_to_hid(
+            float(local.x()),
+            float(local.y()),
+            self._current_mapping(),
+        )
+
     def _send_hybrid_jump(self) -> None:
         """Send a single PKT_MOUSE_ABS at the KVM activation click.
 
@@ -1170,7 +1271,7 @@ class MainWindow(QMainWindow):
         mapped = map_widget_point_to_hid(
             float(local.x()), float(local.y()), mapping
         )
-        self._serial.enqueue(
+        self._serial.enqueue_mouse_motion(
             build_mouse_abs_report(0, mapped.hid_x, mapped.hid_y)
         )
         # Update duplicate-suppression cache so subsequent moves don't
@@ -1178,6 +1279,57 @@ class MainWindow(QMainWindow):
         self._last_abs_x = mapped.hid_x
         self._last_abs_y = mapped.hid_y
         self._last_abs_buttons = 0
+
+    def _send_absolute_activation_click(self) -> None:
+        """Forward the single click that activated absolute KVM mode."""
+        if not can_send_absolute(self._mode_config):
+            return
+        local = self._pending_kvm_activation_widget_pos
+        button = self._pending_kvm_activation_button
+        if local is None or button == 0:
+            return
+        from core.coordinates import map_widget_point_to_hid
+
+        mapped = map_widget_point_to_hid(
+            float(local.x()),
+            float(local.y()),
+            self._current_mapping(),
+        )
+        self._serial.enqueue_mouse_transition(
+            build_absolute_click(button, mapped.hid_x, mapped.hid_y)
+        )
+        self._last_abs_x = mapped.hid_x
+        self._last_abs_y = mapped.hid_y
+        self._last_abs_buttons = 0
+
+    def _send_absolute_button_transition(
+        self,
+        previous_buttons: int,
+        next_buttons: int,
+    ) -> bool:
+        """Queue an ordered absolute-position/button-state transition."""
+        if not can_send_absolute(self._mode_config):
+            return False
+        mapped = self._map_absolute_cursor(allow_outside=True)
+        if mapped is None:
+            if self._last_abs_x < 0 or self._last_abs_y < 0:
+                return False
+            x, y = self._last_abs_x, self._last_abs_y
+        else:
+            x, y = mapped.hid_x, mapped.hid_y
+
+        self._serial.enqueue_mouse_transition(
+            build_absolute_button_transition(
+                previous_buttons,
+                next_buttons,
+                x,
+                y,
+            )
+        )
+        self._last_abs_x = x
+        self._last_abs_y = y
+        self._last_abs_buttons = next_buttons & 0x07
+        return True
 
     def _send_absolute_mouse(self) -> None:
         """Send a PKT_MOUSE_ABS for the current host cursor position.
@@ -1189,30 +1341,17 @@ class MainWindow(QMainWindow):
         """
         if not can_send_absolute(self._mode_config):
             return
-        from core.coordinates import map_widget_point_to_hid
-        mapping = self._current_mapping()
-        # ``mapFromGlobal`` works in widget-local logical pixels.
-        try:
-            cursor_global = QCursor.pos()
-            local = self._video_widget.mapFromGlobal(cursor_global)
-        except Exception:
-            return
-        if not (
-            0 <= local.x() < self._video_widget.width()
-            and 0 <= local.y() < self._video_widget.height()
-        ):
-            return  # cursor not inside the VideoWidget
-        mapped = map_widget_point_to_hid(
-            float(local.x()), float(local.y()), mapping
-        )
         buttons = self._input_state.mouse_buttons
+        mapped = self._map_absolute_cursor(allow_outside=bool(buttons))
+        if mapped is None:
+            return
         if (
             mapped.hid_x == self._last_abs_x
             and mapped.hid_y == self._last_abs_y
             and buttons == self._last_abs_buttons
         ):
             return
-        self._serial.enqueue(
+        self._serial.enqueue_mouse_motion(
             build_mouse_abs_report(buttons, mapped.hid_x, mapped.hid_y)
         )
         self._last_abs_x = mapped.hid_x
@@ -1226,9 +1365,17 @@ class MainWindow(QMainWindow):
         delta   = event.angleDelta().y()
         wheel_v = 1 if delta > 0 else (-1 if delta < 0 else 0)
         if wheel_v:
+            # Absolute and relative mouse interfaces maintain independent
+            # button state.  Never mirror an absolute held button onto the
+            # relative interface merely to transport a wheel tick.
+            wheel_buttons = (
+                0
+                if self._effective_mode is MouseMode.ABSOLUTE
+                else self._input_state.mouse_buttons
+            )
             self._serial.enqueue(
                 build_mouse_report(
-                    self._input_state.mouse_buttons,
+                    wheel_buttons,
                     0, 0, wheel_v,
                 )
             )
@@ -1238,13 +1385,16 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------------
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        keyboard_allowed = self._keyboard_forwarding_allowed()
+
         # Amical's Windows helper injects a scan-code-zero Ctrl+V after F9.
         # Capture it before the Raw Input duplicate-suppression return below.
-        if self._handle_amical_key_press(event):
+        if keyboard_allowed and self._handle_amical_key_press(event):
             return
 
         if (
-            self._amical_enabled
+            keyboard_allowed
+            and self._amical_enabled
             and self._kvm_active
             and not self._use_raw_input
             and event.key() == Qt.Key.Key_F9
@@ -1273,11 +1423,18 @@ class MainWindow(QMainWindow):
         # When Raw Input is active, skip Qt keyboard events entirely
         # to avoid double-sending every keystroke.
         if self._use_raw_input and self._kvm_active:
+            if not keyboard_allowed:
+                self._release_forwarded_keyboard()
             return
 
         key = event.key()
 
         if not self._kvm_active:
+            super().keyPressEvent(event)
+            return
+
+        if not keyboard_allowed:
+            self._release_forwarded_keyboard()
             super().keyPressEvent(event)
             return
 
@@ -1297,11 +1454,14 @@ class MainWindow(QMainWindow):
             self._serial.enqueue(build_keyboard_report(modifier, keys))
 
     def keyReleaseEvent(self, event: QKeyEvent) -> None:  # noqa: N802
-        if self._handle_amical_key_release(event):
+        keyboard_allowed = self._keyboard_forwarding_allowed()
+
+        if keyboard_allowed and self._handle_amical_key_release(event):
             return
 
         if (
-            self._amical_enabled
+            keyboard_allowed
+            and self._amical_enabled
             and self._kvm_active
             and not self._use_raw_input
             and event.key() == Qt.Key.Key_F9
@@ -1312,9 +1472,16 @@ class MainWindow(QMainWindow):
 
         # When Raw Input is active, skip Qt keyboard events.
         if self._use_raw_input and self._kvm_active:
+            if not keyboard_allowed:
+                self._release_forwarded_keyboard()
             return
 
         if not self._kvm_active:
+            super().keyReleaseEvent(event)
+            return
+
+        if not keyboard_allowed:
+            self._release_forwarded_keyboard()
             super().keyReleaseEvent(event)
             return
 
@@ -1382,14 +1549,6 @@ class MainWindow(QMainWindow):
         if not self._kvm_active:
             return
 
-        if (
-            self._amical_enabled
-            and scancode == AMICAL_F9_SCANCODE
-            and vk == AMICAL_F9_VK
-        ):
-            self._begin_amical_f9()
-            return
-
         # Escape handling with fullscreen awareness
         if scancode == 0x01:  # Esc
             if self._is_fullscreen:
@@ -1401,6 +1560,18 @@ class MainWindow(QMainWindow):
                     self.toggle_fullscreen()
             else:
                 self._set_kvm_active(False)
+            return
+
+        if not self._keyboard_forwarding_allowed():
+            self._release_forwarded_keyboard()
+            return
+
+        if (
+            self._amical_enabled
+            and scancode == AMICAL_F9_SCANCODE
+            and vk == AMICAL_F9_VK
+        ):
+            self._begin_amical_f9()
             return
 
         # Modifier keys: use VK → modifier bit (full L/R discrimination)
@@ -1431,6 +1602,9 @@ class MainWindow(QMainWindow):
         """Raw Input keyboard release callback."""
         if not self._kvm_active:
             return
+        if not self._keyboard_forwarding_allowed():
+            self._release_forwarded_keyboard()
+            return
         if (
             self._amical_enabled
             and scancode == AMICAL_F9_SCANCODE
@@ -1454,6 +1628,12 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------------
     # Focus / close
     # -------------------------------------------------------------------------
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        """Stop keyboard forwarding as soon as the cursor leaves the window."""
+        if self._kvm_active:
+            self._release_forwarded_keyboard()
+        super().leaveEvent(event)
 
     def focusOutEvent(self, event) -> None:  # noqa: N802
         self._set_kvm_active(False)

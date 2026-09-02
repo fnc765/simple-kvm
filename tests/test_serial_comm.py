@@ -191,3 +191,37 @@ def test_stop_wait_budget_covers_a_complete_three_write_sequence():
 
     assert comm.interruption_requested is True
     assert comm.waited_ms >= 4_100
+
+
+def test_absolute_motion_is_latest_wins_in_one_priority_slot():
+    comm = SerialComm()
+
+    assert comm.enqueue_mouse_motion(b"old-position") is True
+    assert comm.enqueue_mouse_motion(b"new-position") is True
+    assert comm._mouse_priority.qsize() == 1
+
+    assert comm._next_queue_item() == b"new-position"
+
+
+def test_mouse_transition_cancels_stale_motion_and_stays_fifo():
+    comm = SerialComm()
+    first = PacketSequence((PacketStep(b"move"), PacketStep(b"down")))
+    second = PacketSequence((PacketStep(b"held"), PacketStep(b"up")))
+
+    comm.enqueue_mouse_motion(b"stale-motion")
+    assert comm.enqueue_mouse_transition(first) is True
+    assert comm.enqueue_mouse_transition(second) is True
+
+    assert comm._next_queue_item() == first
+    assert comm._next_queue_item() == second
+
+
+def test_mouse_transition_is_not_rejected_when_normal_queue_is_full():
+    comm = SerialComm()
+    comm._queue = queue.Queue(maxsize=1)
+    comm._queue.put_nowait(b"ordinary-traffic")
+    transition = PacketSequence((PacketStep(b"down"), PacketStep(b"up")))
+
+    assert comm.enqueue_mouse_transition(transition) is True
+    assert comm._next_queue_item() == transition
+    assert comm._queue.get_nowait() == b"ordinary-traffic"

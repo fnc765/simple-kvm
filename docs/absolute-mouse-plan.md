@@ -5,6 +5,8 @@ bundle: C:\Users\choco\Documents\programming\simple-kvm\.codex\chatgpt-bridge\bu
 capturedAt: 2026-06-24T12:19:53.952Z
 -->
 
+> **実装状況 (2026-09-02): 完了・実機確認済み。** WindowsターゲットPCでPhase 3の3-interface HIDが専用ドライバなしで列挙され、Absolute座標操作とキーボード境界が動作することを確認済みです。同一ホストの自動ループバックではクリック順序、latest-wins、無通信時解放まで確認しています。現在の利用・検証手順は[`setup.md`](setup.md)を参照してください。
+
 以下が最終版の Markdown 実装プランです。Codex にそのまま渡す前提で、実装順・変更ファイル・テスト観点を具体化しています。
 
 編集# simple-kvm 絶対座標マウス対応 実装計画
@@ -250,7 +252,8 @@ KVM active:
 - FPS / relative mouse 前提アプリには不向き。
 - mouse speed multiplier は適用しない。
 - wheel は既存 `PKT_MOUSE` で送る。
-- keyboard は既存通り転送する。
+- 物理keyboardは、host cursorがsimple-kvmウィンドウ内にある場合だけ転送する。
+- cursorが境界外へ出た時点でtarget keyboardの全キーを解放し、KVMとabsolute mouseの有効状態は維持する。
 
 ### 3.2 UI naming
 

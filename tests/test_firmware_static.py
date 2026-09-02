@@ -200,6 +200,20 @@ def test_patch_c_source_clears_abs_mousestate_on_datain():
     assert "AbsMousestate" in body
 
 
+def test_absolute_interface_is_non_boot_in_all_config_descriptors():
+    """Absolute reports must not claim the relative Boot Mouse protocol."""
+    text = _read("usbd_hid_composite_patch.c")
+    assert text.count("bInterfaceSubClass : non-boot absolute mouse") == 3
+    assert text.count("nInterfaceProtocol : none for non-boot HID") == 3
+
+
+def test_patch_exposes_absolute_endpoint_idle_state():
+    header = _read("usbd_hid_composite_patch.h")
+    source = _read("usbd_hid_composite_patch.c")
+    assert "HID_Composite_abs_mouse_isIdle" in header
+    assert "HID_Composite_abs_mouse_isIdle" in source
+
+
 def test_three_config_descriptors_have_bnuminterfaces_3():
     """All three config descriptors (FS, HS, OtherSpeed) must declare
     bNumInterfaces = 0x03."""
@@ -261,6 +275,34 @@ def test_usbd_ep_conf_override_exists():
     assert "PMA_ABS_MOUSE_IN_ADDR" in text or "HID_ABS_MOUSE_EPIN_SIZE" in text
 
 
+def test_four_endpoint_override_is_force_included_for_framework_sources():
+    override = _read("usbd_ep_conf_override.h")
+    assert re.search(r"#define\s+DEV_NUM_EP\s+0x04U", override)
+    assert re.search(
+        r"extern\s+const\s+ep_desc_t\s+ep_def\s*\[\s*DEV_NUM_EP\s*\+\s*1\s*\]",
+        override,
+    )
+    with open(os.path.join(REPO_ROOT, "platformio.ini"), encoding="utf-8") as f:
+        platformio_ini = f.read()
+    assert "-include firmware/bluepill2/usbd_ep_conf_override.h" in platformio_ini
+
+
+def test_project_usb_overrides_win_deterministically_at_link_time():
+    script = _read("weaken_framework_usb.py")
+    for object_name in (
+        "usbd_desc.c.o",
+        "usbd_ep_conf.c.o",
+        "usbd_hid_composite.c.o",
+    ):
+        assert object_name in script
+    assert 'objcopy, "--weaken"' in script
+
+    with open(os.path.join(REPO_ROOT, "platformio.ini"), encoding="utf-8") as f:
+        platformio_ini = f.read()
+    assert "pre:firmware/bluepill2/weaken_framework_usb.py" in platformio_ini
+    assert "--allow-multiple-definition" not in platformio_ini
+
+
 # ---------------------------------------------------------------------------
 # usbd_desc_patch
 # ---------------------------------------------------------------------------
@@ -271,6 +313,22 @@ def test_bcddevice_bumped_for_phase3():
     assert re.search(r"0x01,\s*/\*\s*bcdDevice rel\. 24\.01", text), (
         "bcdDevice must be bumped to 24.01 (0x01, 0x18) for Phase 3"
     )
+
+
+def test_device_descriptor_ep0_size_matches_usb_core():
+    text = _read("usbd_desc_patch.c")
+    descriptor_blocks = re.findall(
+        r"USBD_Class_DeviceDesc\s*\[[^\]]+\][^{]*\{(.*?)\n\};",
+        text,
+        re.DOTALL,
+    )
+    assert descriptor_blocks
+    for block in descriptor_blocks:
+        assert "USB_MAX_EP0_SIZE" in block
+        assert not re.search(
+            r"0x08,\s*/\*\s*bMaxPacketSize",
+            block,
+        ), "EP0 descriptor size must not diverge from the USB core"
 
 
 # ---------------------------------------------------------------------------
@@ -286,3 +344,26 @@ def test_main_cpp_handles_pkt_mouse_abs():
         r"case\s+PKT_MOUSE_ABS\s*:\s*hid_send_mouse_abs",
         text,
     ), "switch case for PKT_MOUSE_ABS must dispatch to hid_send_mouse_abs"
+
+
+def test_main_cpp_queues_absolute_reports_instead_of_dropping_usb_busy():
+    text = _read("main.cpp")
+    match = re.search(
+        r"static\s+void\s+hid_send_mouse_abs\s*\([^)]*\)\s*\{(.+?)\n\}",
+        text,
+        re.DOTALL,
+    )
+    assert match, "hid_send_mouse_abs body missing"
+    assert "abs_queue_report" in match.group(1)
+    assert "USBD_HID_ABS_MOUSE_SendReport" not in match.group(1)
+    assert "ABS_MOUSE_QUEUE_CAPACITY" in text
+    assert "g_abs_head_inflight" in text
+    assert "HID_Composite_abs_mouse_isIdle" in text
+    assert "status == USBD_OK" in text
+
+
+def test_main_cpp_has_fail_safe_absolute_button_release_timeout():
+    text = _read("main.cpp")
+    assert "ABS_INPUT_TIMEOUT_MS" in text
+    assert "g_last_uart_activity_ms" in text
+    assert re.search(r"release_report\s*\[\s*0\s*\]\s*=\s*0", text)
