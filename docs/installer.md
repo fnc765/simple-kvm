@@ -102,4 +102,5 @@ git push origin v0.1.0
 - [ ] アンインストーラーが正常動作すること
 - [ ] `THIRD_PARTY_NOTICES.md`と`pykakasi-*.dist-info/COPYING`が配布物に含まれること
 - [ ] Amical Romaji Forwardingで日本語がローマ字としてターゲットへ入力されること
+- [ ] Send Clipboard as Base64で日本語テキストのBase64本文だけが入力され、JIS／US配列選択・進捗・中断・全キー解放が動作すること
 - [ ] [VirusTotal](https://www.virustotal.com) で誤検知チェック

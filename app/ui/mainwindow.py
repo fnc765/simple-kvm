@@ -30,6 +30,7 @@ import ctypes
 import time
 from ctypes import wintypes
 from threading import Event
+from uuid import uuid4
 
 from PySide6.QtCore import QPoint, QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import (
@@ -60,6 +61,10 @@ from core.capture import (
     APP_NAME,
     list_dshow_devices,
 )
+from core.clipboard_base64 import (
+    build_base64_typing_sequence,
+    encode_clipboard_text,
+)
 from core.amical_bridge import (
     AMICAL_F9_SCANCODE,
     AMICAL_F9_VK,
@@ -69,6 +74,10 @@ from core.amical_bridge import (
     AmicalPasteGate,
     build_ascii_typing_sequence,
     romanize_for_hid,
+)
+from core.absolute_mouse import (
+    build_absolute_button_transition,
+    build_absolute_click,
 )
 from core.input_hook import InputState, RawInputHook
 from core.keymap import (
@@ -95,13 +104,16 @@ from core.mouse_modes import (
 from core.serial_comm import SerialComm
 from core.special_keys import SPECIAL_KEY_PRESETS, SpecialKeyPreset
 from core.settings_values import (
+    read_base64_keyboard_layout_setting,
     read_amical_romaji_enabled_setting,
     read_mouse_mode_setting,
     read_firmware_abs_setting,
+    write_base64_keyboard_layout_setting,
     write_amical_romaji_enabled_setting,
     write_mouse_mode_setting,
     write_firmware_abs_setting,
 )
+from ui.base64_transfer_dialog import Base64TransferDialog
 from ui.settings_dialog import SettingsDialog
 
 
@@ -181,9 +193,15 @@ class MainWindow(QMainWindow):
         self._amical_enabled = read_amical_romaji_enabled_setting(
             self._settings
         )
+        self._base64_keyboard_layout = read_base64_keyboard_layout_setting(
+            self._settings
+        )
         self._amical_gate = AmicalPasteGate()
         self._amical_injected_chord_active = False
         self._amical_send_cancel: Event | None = None
+        self._base64_transfer_id: str | None = None
+        self._base64_send_cancel: Event | None = None
+        self._base64_dialog: Base64TransferDialog | None = None
 
         # ---- Video widget ---------------------------------------------------
         self._video_widget = VideoWidget(self)
@@ -254,6 +272,17 @@ class MainWindow(QMainWindow):
             "romaji, and type it on the target without pressing Enter."
         )
         self._amical_enabled_action.toggled.connect(self._set_amical_enabled)
+        self._base64_clipboard_action = input_menu.addAction(
+            "Send Clipboard as Base64…"
+        )
+        self._base64_clipboard_action.setEnabled(False)
+        self._base64_clipboard_action.setToolTip(
+            "Type the complete UTF-8 clipboard text as standard Base64 "
+            "without adding Enter or framing characters."
+        )
+        self._base64_clipboard_action.triggered.connect(
+            self._open_base64_transfer
+        )
         input_menu.addSeparator()
         special_keys_menu = input_menu.addMenu("Send Special Keys")
         self._special_key_actions = {}
@@ -275,6 +304,7 @@ class MainWindow(QMainWindow):
         # Click that initiated KVM focus, in widget-local coordinates.
         # Used by ``hybrid`` mode to compute the absolute jump target.
         self._pending_kvm_activation_widget_pos: QPoint | None = None
+        self._pending_kvm_activation_button: int = 0
         # Last absolute HID coordinate sent (for duplicate suppression).
         self._last_abs_x: int = -1
         self._last_abs_y: int = -1
@@ -304,6 +334,12 @@ class MainWindow(QMainWindow):
         # ---- Serial communication -------------------------------------------
         self._serial = SerialComm(self)
         self._serial.connected.connect(self._on_serial_connected)
+        self._serial.sequence_progress.connect(
+            self._on_base64_sequence_progress
+        )
+        self._serial.sequence_finished.connect(
+            self._on_base64_sequence_finished
+        )
 
         # ---- Capture thread -------------------------------------------------
         self._capture = CaptureThread(DEFAULT_DEVICE, self)
@@ -412,6 +448,7 @@ class MainWindow(QMainWindow):
 
     def _apply_settings(self) -> None:
         self._set_kvm_active(False)
+        self._cancel_base64_transfer()
 
         # Restart serial
         self._serial.stop()
@@ -433,12 +470,16 @@ class MainWindow(QMainWindow):
         self._connected = connected
         for action in self._special_key_actions.values():
             action.setEnabled(connected)
+        self._refresh_base64_action()
         if connected:
             self._status.showMessage(f"Connected: {self._port}")
         else:
             if self._amical_send_cancel is not None:
                 self._amical_send_cancel.set()
                 self._amical_send_cancel = None
+            if self._base64_transfer_id is not None:
+                self._cancel_base64_transfer()
+                self._finish_base64_transfer("failed")
             self._status.showMessage("Disconnected")
 
     def _on_frame_ready(self, image: QImage) -> None:
@@ -468,9 +509,23 @@ class MainWindow(QMainWindow):
             # cursor snaps to the position the user just clicked on.
             if self._effective_mode is MouseMode.HYBRID and self._kvm_active:
                 self._send_hybrid_jump()
+            elif (
+                self._effective_mode is MouseMode.ABSOLUTE
+                and self._kvm_active
+            ):
+                # Absolute mode can safely forward the activation click:
+                # move -> down -> up at the remembered video coordinate.
+                # The 400 ms single/double-click discriminator has already
+                # expired, so a fullscreen double-click is never forwarded.
+                self._send_absolute_activation_click()
+        self._pending_kvm_activation_widget_pos = None
+        self._pending_kvm_activation_button = 0
 
     def _send_heartbeat(self) -> None:
-        if self._serial.isRunning():
+        if (
+            self._base64_transfer_id is None
+            and self._serial.isRunning()
+        ):
             self._serial.enqueue(build_heartbeat())
 
     def _send_special_key(self, preset: SpecialKeyPreset) -> None:
@@ -487,6 +542,156 @@ class MainWindow(QMainWindow):
             self._status.showMessage(
                 f"Special keys not sent: send queue full ({preset.label})"
             )
+
+    def _refresh_base64_action(self) -> None:
+        self._base64_clipboard_action.setEnabled(
+            self._connected
+            and self._base64_transfer_id is None
+            and self._base64_dialog is None
+        )
+
+    def _open_base64_transfer(self) -> None:
+        """Open a confirmation/progress dialog for the current text clipboard."""
+        if not self._connected:
+            self._status.showMessage(
+                "Clipboard Base64 not sent: serial is disconnected"
+            )
+            return
+        if self._base64_dialog is not None:
+            self._base64_dialog.raise_()
+            self._base64_dialog.activateWindow()
+            return
+
+        clipboard = QApplication.clipboard()
+        mime_data = clipboard.mimeData()
+        if mime_data is None or not mime_data.hasText():
+            self._status.showMessage(
+                "Clipboard Base64 not sent: clipboard has no text"
+            )
+            return
+        try:
+            payload = encode_clipboard_text(clipboard.text())
+        except (TypeError, ValueError):
+            self._status.showMessage(
+                "Clipboard Base64 not sent: clipboard text is empty"
+            )
+            return
+
+        dialog = Base64TransferDialog(
+            payload,
+            keyboard_layout=self._base64_keyboard_layout,
+            parent=self,
+        )
+        dialog.start_requested.connect(
+            lambda tracked=dialog: self._start_base64_transfer(tracked)
+        )
+        dialog.cancel_requested.connect(self._cancel_base64_transfer)
+        dialog.finished.connect(
+            lambda _result, tracked=dialog:
+            self._on_base64_dialog_closed(tracked)
+        )
+        self._base64_dialog = dialog
+        self._refresh_base64_action()
+        dialog.open()
+
+    def _start_base64_transfer(
+        self,
+        dialog: Base64TransferDialog,
+    ) -> None:
+        """Queue one tracked Base64 sequence after explicit confirmation."""
+        if dialog is not self._base64_dialog:
+            return
+        if self._base64_transfer_id is not None:
+            return
+        if not self._connected:
+            dialog.set_outcome("failed")
+            self._status.showMessage(
+                "Clipboard Base64 not sent: serial is disconnected"
+            )
+            return
+
+        self._set_kvm_active(False)
+        transfer_id = uuid4().hex
+        cancel_event = Event()
+        self._base64_keyboard_layout = dialog.keyboard_layout
+        sequence = build_base64_typing_sequence(
+            dialog.payload,
+            transfer_id=transfer_id,
+            cancel_event=cancel_event,
+            keyboard_layout=self._base64_keyboard_layout,
+        )
+        self._save_settings()
+
+        self._base64_transfer_id = transfer_id
+        self._base64_send_cancel = cancel_event
+        dialog.begin_transfer()
+        self._refresh_base64_action()
+
+        if not self._serial.enqueue_sequence(sequence):
+            cancel_event.set()
+            self._finish_base64_transfer("failed")
+            self._status.showMessage(
+                "Clipboard Base64 not sent: send queue is full"
+            )
+            return
+
+        self._status.showMessage(
+            "Sending clipboard Base64: "
+            f"0 / {dialog.payload.encoded_characters} characters"
+        )
+
+    def _cancel_base64_transfer(self) -> None:
+        """Request cancellation without blocking the GUI thread."""
+        if self._base64_send_cancel is None:
+            return
+        self._base64_send_cancel.set()
+        self._status.showMessage("Cancelling clipboard Base64 transfer…")
+
+    def _on_base64_sequence_progress(
+        self,
+        transfer_id: str,
+        completed: int,
+        total: int,
+    ) -> None:
+        if transfer_id != self._base64_transfer_id:
+            return
+        if self._base64_dialog is not None:
+            self._base64_dialog.set_progress(completed, total)
+
+    def _on_base64_sequence_finished(
+        self,
+        transfer_id: str,
+        outcome: str,
+    ) -> None:
+        if transfer_id != self._base64_transfer_id:
+            return
+        self._finish_base64_transfer(outcome)
+
+    def _finish_base64_transfer(self, outcome: str) -> None:
+        """Clear active transfer state and present its terminal result."""
+        if self._base64_transfer_id is None:
+            return
+        self._base64_transfer_id = None
+        self._base64_send_cancel = None
+        if self._base64_dialog is not None:
+            self._base64_dialog.set_outcome(outcome)
+        self._refresh_base64_action()
+
+        messages = {
+            "completed": "Clipboard Base64 transfer completed",
+            "cancelled": "Clipboard Base64 transfer cancelled",
+            "failed": "Clipboard Base64 transfer failed",
+        }
+        self._status.showMessage(messages.get(outcome, messages["failed"]))
+
+    def _on_base64_dialog_closed(
+        self,
+        dialog: Base64TransferDialog,
+    ) -> None:
+        if dialog is not self._base64_dialog:
+            return
+        self._base64_dialog = None
+        self._refresh_base64_action()
 
     def _set_amical_enabled(self, enabled: bool) -> None:
         """Enable or disable opt-in F9-to-romaji forwarding."""
@@ -626,7 +831,32 @@ class MainWindow(QMainWindow):
     # Focus / KVM active mode
     # -------------------------------------------------------------------------
 
+    def _keyboard_forwarding_allowed(self) -> bool:
+        """Return whether physical keyboard input may reach the target.
+
+        Absolute mouse mode intentionally lets the host cursor leave this
+        window without deactivating KVM mode.  Raw Input can still arrive while
+        another application has focus, so window focus alone is not a safe
+        keyboard-forwarding boundary.
+        """
+        return (
+            self._kvm_active
+            and self.isVisible()
+            and self.frameGeometry().contains(QCursor.pos())
+        )
+
+    def _release_forwarded_keyboard(self) -> None:
+        """Release target keyboard state without disturbing mouse/KVM state."""
+        modifier, keys = self._input_state.get_keyboard_report()
+        had_pressed_keys = bool(modifier or any(keys))
+        self._input_state.clear_keyboard()
+        self._reset_amical_flow(cancel_typing=True)
+        if had_pressed_keys:
+            self._serial.enqueue(build_keyboard_report(0, []))
+
     def _set_kvm_active(self, active: bool) -> None:
+        if active and self._base64_transfer_id is not None:
+            return
         if self._kvm_active == active:
             return
         self._kvm_active = active
@@ -652,6 +882,18 @@ class MainWindow(QMainWindow):
                 f"mode: {self._effective_mode.value}{amical_part})"
             )
         else:
+            held_mouse_buttons = self._input_state.mouse_buttons
+            if (
+                held_mouse_buttons
+                and self._effective_mode is MouseMode.ABSOLUTE
+            ):
+                # Release the absolute interface before clearing local state.
+                # Sending only a zero report on the separate relative-mouse
+                # interface cannot release a button held by this collection.
+                self._send_absolute_button_transition(
+                    held_mouse_buttons,
+                    0,
+                )
             self._reset_amical_flow(cancel_typing=True)
             # Guard: do not touch menu bar when fullscreen (managed by fullscreen exit)
             if not self._is_fullscreen:
@@ -822,9 +1064,13 @@ class MainWindow(QMainWindow):
                 # Remember where the user clicked so ``hybrid`` mode can
                 # jump the target cursor to the matching screen position.
                 self._pending_kvm_activation_widget_pos = local
+                self._pending_kvm_activation_button = self._mouse_button_bit(
+                    event.button()
+                )
                 self._kvm_click_timer.start(400)
             return
 
+        previous_buttons = self._input_state.mouse_buttons
         btn = event.button()
         if btn == Qt.MouseButton.LeftButton:
             self._input_state.set_mouse_button(0x01, True)
@@ -834,7 +1080,12 @@ class MainWindow(QMainWindow):
             self._input_state.set_mouse_button(0x04, True)
 
         if self._effective_mode is MouseMode.ABSOLUTE:
-            self._send_absolute_mouse()
+            next_buttons = self._input_state.mouse_buttons
+            if next_buttons != previous_buttons:
+                self._send_absolute_button_transition(
+                    previous_buttons,
+                    next_buttons,
+                )
         else:
             self._serial.enqueue(
                 build_mouse_report(self._input_state.mouse_buttons, 0, 0)
@@ -844,6 +1095,7 @@ class MainWindow(QMainWindow):
         if not self._kvm_active:
             return
 
+        previous_buttons = self._input_state.mouse_buttons
         btn = event.button()
         if btn == Qt.MouseButton.LeftButton:
             self._input_state.set_mouse_button(0x01, False)
@@ -853,7 +1105,12 @@ class MainWindow(QMainWindow):
             self._input_state.set_mouse_button(0x04, False)
 
         if self._effective_mode is MouseMode.ABSOLUTE:
-            self._send_absolute_mouse()
+            next_buttons = self._input_state.mouse_buttons
+            if next_buttons != previous_buttons:
+                self._send_absolute_button_transition(
+                    previous_buttons,
+                    next_buttons,
+                )
         else:
             self._serial.enqueue(
                 build_mouse_report(self._input_state.mouse_buttons, 0, 0)
@@ -862,6 +1119,8 @@ class MainWindow(QMainWindow):
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         """Double-click on video widget toggles fullscreen."""
         self._kvm_click_timer.stop()  # Cancel pending KVM activation
+        self._pending_kvm_activation_widget_pos = None
+        self._pending_kvm_activation_button = 0
         if not self._kvm_active:
             local = self._video_widget.mapFromGlobal(
                 event.globalPosition().toPoint()
@@ -964,6 +1223,39 @@ class MainWindow(QMainWindow):
             self._aspect_setting,
         )
 
+    @staticmethod
+    def _mouse_button_bit(button: Qt.MouseButton) -> int:
+        """Return the HID bit for a Qt mouse button, or zero if unsupported."""
+        if button == Qt.MouseButton.LeftButton:
+            return 0x01
+        if button == Qt.MouseButton.RightButton:
+            return 0x02
+        if button == Qt.MouseButton.MiddleButton:
+            return 0x04
+        return 0
+
+    def _map_absolute_cursor(self, *, allow_outside: bool = False):
+        """Map the current host cursor, optionally clamping a drag to edges."""
+        from core.coordinates import map_widget_point_to_hid
+
+        try:
+            cursor_global = QCursor.pos()
+            local = self._video_widget.mapFromGlobal(cursor_global)
+        except Exception:
+            return None
+
+        inside = (
+            0 <= local.x() < self._video_widget.width()
+            and 0 <= local.y() < self._video_widget.height()
+        )
+        if not inside and not allow_outside:
+            return None
+        return map_widget_point_to_hid(
+            float(local.x()),
+            float(local.y()),
+            self._current_mapping(),
+        )
+
     def _send_hybrid_jump(self) -> None:
         """Send a single PKT_MOUSE_ABS at the KVM activation click.
 
@@ -979,7 +1271,7 @@ class MainWindow(QMainWindow):
         mapped = map_widget_point_to_hid(
             float(local.x()), float(local.y()), mapping
         )
-        self._serial.enqueue(
+        self._serial.enqueue_mouse_motion(
             build_mouse_abs_report(0, mapped.hid_x, mapped.hid_y)
         )
         # Update duplicate-suppression cache so subsequent moves don't
@@ -987,6 +1279,57 @@ class MainWindow(QMainWindow):
         self._last_abs_x = mapped.hid_x
         self._last_abs_y = mapped.hid_y
         self._last_abs_buttons = 0
+
+    def _send_absolute_activation_click(self) -> None:
+        """Forward the single click that activated absolute KVM mode."""
+        if not can_send_absolute(self._mode_config):
+            return
+        local = self._pending_kvm_activation_widget_pos
+        button = self._pending_kvm_activation_button
+        if local is None or button == 0:
+            return
+        from core.coordinates import map_widget_point_to_hid
+
+        mapped = map_widget_point_to_hid(
+            float(local.x()),
+            float(local.y()),
+            self._current_mapping(),
+        )
+        self._serial.enqueue_mouse_transition(
+            build_absolute_click(button, mapped.hid_x, mapped.hid_y)
+        )
+        self._last_abs_x = mapped.hid_x
+        self._last_abs_y = mapped.hid_y
+        self._last_abs_buttons = 0
+
+    def _send_absolute_button_transition(
+        self,
+        previous_buttons: int,
+        next_buttons: int,
+    ) -> bool:
+        """Queue an ordered absolute-position/button-state transition."""
+        if not can_send_absolute(self._mode_config):
+            return False
+        mapped = self._map_absolute_cursor(allow_outside=True)
+        if mapped is None:
+            if self._last_abs_x < 0 or self._last_abs_y < 0:
+                return False
+            x, y = self._last_abs_x, self._last_abs_y
+        else:
+            x, y = mapped.hid_x, mapped.hid_y
+
+        self._serial.enqueue_mouse_transition(
+            build_absolute_button_transition(
+                previous_buttons,
+                next_buttons,
+                x,
+                y,
+            )
+        )
+        self._last_abs_x = x
+        self._last_abs_y = y
+        self._last_abs_buttons = next_buttons & 0x07
+        return True
 
     def _send_absolute_mouse(self) -> None:
         """Send a PKT_MOUSE_ABS for the current host cursor position.
@@ -998,30 +1341,17 @@ class MainWindow(QMainWindow):
         """
         if not can_send_absolute(self._mode_config):
             return
-        from core.coordinates import map_widget_point_to_hid
-        mapping = self._current_mapping()
-        # ``mapFromGlobal`` works in widget-local logical pixels.
-        try:
-            cursor_global = QCursor.pos()
-            local = self._video_widget.mapFromGlobal(cursor_global)
-        except Exception:
-            return
-        if not (
-            0 <= local.x() < self._video_widget.width()
-            and 0 <= local.y() < self._video_widget.height()
-        ):
-            return  # cursor not inside the VideoWidget
-        mapped = map_widget_point_to_hid(
-            float(local.x()), float(local.y()), mapping
-        )
         buttons = self._input_state.mouse_buttons
+        mapped = self._map_absolute_cursor(allow_outside=bool(buttons))
+        if mapped is None:
+            return
         if (
             mapped.hid_x == self._last_abs_x
             and mapped.hid_y == self._last_abs_y
             and buttons == self._last_abs_buttons
         ):
             return
-        self._serial.enqueue(
+        self._serial.enqueue_mouse_motion(
             build_mouse_abs_report(buttons, mapped.hid_x, mapped.hid_y)
         )
         self._last_abs_x = mapped.hid_x
@@ -1035,9 +1365,17 @@ class MainWindow(QMainWindow):
         delta   = event.angleDelta().y()
         wheel_v = 1 if delta > 0 else (-1 if delta < 0 else 0)
         if wheel_v:
+            # Absolute and relative mouse interfaces maintain independent
+            # button state.  Never mirror an absolute held button onto the
+            # relative interface merely to transport a wheel tick.
+            wheel_buttons = (
+                0
+                if self._effective_mode is MouseMode.ABSOLUTE
+                else self._input_state.mouse_buttons
+            )
             self._serial.enqueue(
                 build_mouse_report(
-                    self._input_state.mouse_buttons,
+                    wheel_buttons,
                     0, 0, wheel_v,
                 )
             )
@@ -1047,13 +1385,16 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------------
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        keyboard_allowed = self._keyboard_forwarding_allowed()
+
         # Amical's Windows helper injects a scan-code-zero Ctrl+V after F9.
         # Capture it before the Raw Input duplicate-suppression return below.
-        if self._handle_amical_key_press(event):
+        if keyboard_allowed and self._handle_amical_key_press(event):
             return
 
         if (
-            self._amical_enabled
+            keyboard_allowed
+            and self._amical_enabled
             and self._kvm_active
             and not self._use_raw_input
             and event.key() == Qt.Key.Key_F9
@@ -1082,11 +1423,18 @@ class MainWindow(QMainWindow):
         # When Raw Input is active, skip Qt keyboard events entirely
         # to avoid double-sending every keystroke.
         if self._use_raw_input and self._kvm_active:
+            if not keyboard_allowed:
+                self._release_forwarded_keyboard()
             return
 
         key = event.key()
 
         if not self._kvm_active:
+            super().keyPressEvent(event)
+            return
+
+        if not keyboard_allowed:
+            self._release_forwarded_keyboard()
             super().keyPressEvent(event)
             return
 
@@ -1106,11 +1454,14 @@ class MainWindow(QMainWindow):
             self._serial.enqueue(build_keyboard_report(modifier, keys))
 
     def keyReleaseEvent(self, event: QKeyEvent) -> None:  # noqa: N802
-        if self._handle_amical_key_release(event):
+        keyboard_allowed = self._keyboard_forwarding_allowed()
+
+        if keyboard_allowed and self._handle_amical_key_release(event):
             return
 
         if (
-            self._amical_enabled
+            keyboard_allowed
+            and self._amical_enabled
             and self._kvm_active
             and not self._use_raw_input
             and event.key() == Qt.Key.Key_F9
@@ -1121,9 +1472,16 @@ class MainWindow(QMainWindow):
 
         # When Raw Input is active, skip Qt keyboard events.
         if self._use_raw_input and self._kvm_active:
+            if not keyboard_allowed:
+                self._release_forwarded_keyboard()
             return
 
         if not self._kvm_active:
+            super().keyReleaseEvent(event)
+            return
+
+        if not keyboard_allowed:
+            self._release_forwarded_keyboard()
             super().keyReleaseEvent(event)
             return
 
@@ -1191,14 +1549,6 @@ class MainWindow(QMainWindow):
         if not self._kvm_active:
             return
 
-        if (
-            self._amical_enabled
-            and scancode == AMICAL_F9_SCANCODE
-            and vk == AMICAL_F9_VK
-        ):
-            self._begin_amical_f9()
-            return
-
         # Escape handling with fullscreen awareness
         if scancode == 0x01:  # Esc
             if self._is_fullscreen:
@@ -1210,6 +1560,18 @@ class MainWindow(QMainWindow):
                     self.toggle_fullscreen()
             else:
                 self._set_kvm_active(False)
+            return
+
+        if not self._keyboard_forwarding_allowed():
+            self._release_forwarded_keyboard()
+            return
+
+        if (
+            self._amical_enabled
+            and scancode == AMICAL_F9_SCANCODE
+            and vk == AMICAL_F9_VK
+        ):
+            self._begin_amical_f9()
             return
 
         # Modifier keys: use VK → modifier bit (full L/R discrimination)
@@ -1240,6 +1602,9 @@ class MainWindow(QMainWindow):
         """Raw Input keyboard release callback."""
         if not self._kvm_active:
             return
+        if not self._keyboard_forwarding_allowed():
+            self._release_forwarded_keyboard()
+            return
         if (
             self._amical_enabled
             and scancode == AMICAL_F9_SCANCODE
@@ -1264,6 +1629,12 @@ class MainWindow(QMainWindow):
     # Focus / close
     # -------------------------------------------------------------------------
 
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        """Stop keyboard forwarding as soon as the cursor leaves the window."""
+        if self._kvm_active:
+            self._release_forwarded_keyboard()
+        super().leaveEvent(event)
+
     def focusOutEvent(self, event) -> None:  # noqa: N802
         self._set_kvm_active(False)
         super().focusOutEvent(event)
@@ -1276,6 +1647,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         self._save_settings()
         self._kvm_click_timer.stop()
+        self._cancel_base64_transfer()
         if self._is_fullscreen:
             self._exit_fullscreen()
         self._set_kvm_active(False)
@@ -1295,6 +1667,7 @@ class MainWindow(QMainWindow):
     #   video/aspect       : str   – "keep" or "fill"
     #   input/mouse_speed  : str   – speed multiplier as string (e.g. "1.0")
     #   input/amical_romaji_enabled : bool – reserve F9 for Amical bridge
+    #   input/base64_keyboard_layout : str – "jis" or "us"
 
     def _save_settings(self) -> None:
         """Write current settings to persistent storage."""
@@ -1309,6 +1682,10 @@ class MainWindow(QMainWindow):
         write_amical_romaji_enabled_setting(
             self._settings,
             self._amical_enabled,
+        )
+        write_base64_keyboard_layout_setting(
+            self._settings,
+            self._base64_keyboard_layout,
         )
         self._settings.sync()
 

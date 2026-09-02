@@ -6,7 +6,7 @@
   * Changes from original usbd_desc.c:
   *   (a) bcdDevice: 2.00 → 24.00 (0x00,0x18)
   *   (a2) bcdDevice: 24.00 → 24.01 (0x01,0x18) for Phase 3 absolute mouse
-  *   (b) bMaxPacketSize: 0x08 (Logitech C52B uses EP0 size 8)
+  *   (b) bMaxPacketSize: USB_MAX_EP0_SIZE (must match the STM32 USB core)
   *   (c) iSerial: 0x00 (no serial number string, matching Logitech C52B)
   *   (d) USBD_SerialStrDescriptor returns length 0 (iSerial=0 equivalent)
   *   (e) Get_SerialNum() is a no-op
@@ -149,7 +149,10 @@ USBD_DescriptorsTypeDef USBD_Desc = {
 
 #ifdef USBD_USE_HID_COMPOSITE
 /* USB Standard Device Descriptor
- * PATCHED: bMaxPacketSize=0x08, bcdDevice=24.01 (Phase 3), iSerial=0x00 */
+ * PATCHED: bcdDevice=24.01 (Phase 3), iSerial=0x00.
+ * bMaxPacketSize must stay aligned with the USB core's EP0 configuration;
+ * advertising Logitech's value 8 while the core transfers at 64 makes the
+ * first descriptor request fail on Windows with Code 43. */
 __ALIGN_BEGIN uint8_t USBD_Class_DeviceDesc[USB_LEN_DEV_DESC] __ALIGN_END = {
   0x12,                       /* bLength */
   USB_DESC_TYPE_DEVICE,       /* bDescriptorType */
@@ -163,7 +166,7 @@ __ALIGN_BEGIN uint8_t USBD_Class_DeviceDesc[USB_LEN_DEV_DESC] __ALIGN_END = {
   0x00,                       /* bDeviceClass */
   0x00,                       /* bDeviceSubClass */
   0x00,                       /* bDeviceProtocol */
-  0x08,                       /* bMaxPacketSize (Logitech C52B: 8) */
+  USB_MAX_EP0_SIZE,           /* bMaxPacketSize (must match USB core) */
   LOBYTE(USBD_VID),           /* idVendor */
   HIBYTE(USBD_VID),           /* idVendor */
   LOBYTE(USBD_PID),           /* idProduct */
@@ -179,7 +182,7 @@ __ALIGN_BEGIN uint8_t USBD_Class_DeviceDesc[USB_LEN_DEV_DESC] __ALIGN_END = {
 
 #ifdef USBD_USE_CDC
 /* USB Standard Device Descriptor
- * PATCHED: bMaxPacketSize=0x08, bcdDevice=24.00, iSerial=0x00 */
+ * PATCHED: bcdDevice=24.00, iSerial=0x00 */
 __ALIGN_BEGIN uint8_t USBD_Class_DeviceDesc[USB_LEN_DEV_DESC] __ALIGN_END = {
   0x12,                       /* bLength */
   USB_DESC_TYPE_DEVICE,       /* bDescriptorType */
@@ -192,7 +195,7 @@ __ALIGN_BEGIN uint8_t USBD_Class_DeviceDesc[USB_LEN_DEV_DESC] __ALIGN_END = {
   0x02,                       /* bDeviceClass */
   0x02,                       /* bDeviceSubClass */
   0x00,                       /* bDeviceProtocol */
-  0x08,                       /* bMaxPacketSize (Logitech C52B: 8) */
+  USB_MAX_EP0_SIZE,           /* bMaxPacketSize (must match USB core) */
   LOBYTE(USBD_VID),           /* idVendor */
   HIBYTE(USBD_VID),           /* idVendor */
   LOBYTE(USBD_PID),           /* idProduct */
