@@ -209,8 +209,8 @@ __ALIGN_BEGIN static uint8_t USBD_HID_CfgFSDesc[USB_COMPOSITE_HID_CONFIG_DESC_SI
   0x00,                                               /* bAlternateSetting: Alternate setting */
   0x01,                                               /* bNumEndpoints */
   0x03,                                               /* bInterfaceClass: HID */
-  0x01,                                               /* bInterfaceSubClass : 1=BOOT, 0=no boot */
-  0x02,                                               /* nInterfaceProtocol : 0=none, 1=keyboard, 2=mouse */
+  0x00,                                               /* bInterfaceSubClass : non-boot absolute mouse */
+  0x00,                                               /* nInterfaceProtocol : none for non-boot HID */
   0x00,                                               /* iInterface: Index of string descriptor */
   /******************** Descriptor of Absolute Mouse HID ********************/
   /* 68 */
@@ -329,8 +329,8 @@ __ALIGN_BEGIN static uint8_t USBD_HID_CfgHSDesc[USB_COMPOSITE_HID_CONFIG_DESC_SI
   0x00,                                               /* bAlternateSetting: Alternate setting */
   0x01,                                               /* bNumEndpoints */
   0x03,                                               /* bInterfaceClass: HID */
-  0x01,                                               /* bInterfaceSubClass : 1=BOOT, 0=no boot */
-  0x02,                                               /* nInterfaceProtocol : 0=none, 1=keyboard, 2=mouse */
+  0x00,                                               /* bInterfaceSubClass : non-boot absolute mouse */
+  0x00,                                               /* nInterfaceProtocol : none for non-boot HID */
   0x00,                                               /* iInterface: Index of string descriptor */
   /******************** Descriptor of Absolute Mouse HID ********************/
   /* 68 */
@@ -451,8 +451,8 @@ __ALIGN_BEGIN static uint8_t USBD_HID_OtherSpeedCfgDesc[USB_COMPOSITE_HID_CONFIG
   0x00,                                               /* bAlternateSetting: Alternate setting */
   0x01,                                               /* bNumEndpoints */
   0x03,                                               /* bInterfaceClass: HID */
-  0x01,                                               /* bInterfaceSubClass : 1=BOOT, 0=no boot */
-  0x02,                                               /* nInterfaceProtocol : 0=none, 1=keyboard, 2=mouse */
+  0x00,                                               /* bInterfaceSubClass : non-boot absolute mouse */
+  0x00,                                               /* nInterfaceProtocol : none for non-boot HID */
   0x00,                                               /* iInterface: Index of string descriptor */
   /******************** Descriptor of Absolute Mouse HID ********************/
   /* 68 */
@@ -1259,6 +1259,16 @@ uint8_t USBD_HID_ABS_MOUSE_SendReport(USBD_HandleTypeDef *pdev,
   }
 
   return (uint8_t)USBD_OK;
+}
+
+/**
+  * @brief  HID_Composite_abs_mouse_isIdle
+  *         Report whether the absolute-mouse IN endpoint can accept data.
+  * @retval 1 when idle, otherwise 0
+  */
+uint8_t HID_Composite_abs_mouse_isIdle(void)
+{
+  return (_hhid.AbsMousestate == HID_IDLE) ? 1U : 0U;
 }
 
 /**

@@ -4,8 +4,9 @@
   * @brief   PATCH: Endpoint configuration with 4 endpoints for the 3-interface
   *          HID composite (Keyboard + Relative Mouse + Absolute Mouse)
   *
-  * The PlatformIO build middleware excludes the framework's usbd_ep_conf.c,
-  * leaving this file as the single endpoint table provider.
+  * Legacy builds weaken the framework's USB objects before link. Audio builds
+  * exclude the corresponding stock sources. In both profiles, the strong
+  * definitions in this file are selected deterministically.
   *
   * Original source:
   *   ~/.platformio/packages/framework-arduinoststm32/libraries/USBDevice/src/usbd_ep_conf.c

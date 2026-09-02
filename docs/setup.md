@@ -77,9 +77,11 @@ BP2 の HID Composite は **3 つの HID インターフェース**を露出し�
 |-----------|-------|----------|--------|
 | 0 (Keyboard) | HID | Boot Keyboard (LED 出力付き) | 8 バイト入力 + 1 バイト出力 (LED) |
 | 1 (Mouse)    | HID | Boot Mouse (5-byte relative) | `[buttons, dx, dy, wheel_v, wheel_h]` |
-| 2 (Abs Mouse) | HID | Generic Desktop Mouse (absolute) | `[buttons, x_lo, x_hi, y_lo, y_hi]` |
+| 2 (Abs Mouse) | HID | Generic Desktop Mouse (absolute、non-boot) | `[buttons, x_lo, x_hi, y_lo, y_hi]` |
 
 絶対座標マウスを使うには、ホスト側 Settings の **「Firmware supports absolute HID」** チェックボックスをオンにしてください。オフのときは absolute HID 用のパケット (`PKT_MOUSE_ABS`) は送られないので、レガシーフレームウェア (Phase 1〜2) でも問題なく動作します。
+
+BP2 は絶対座標レポートを USB IN 転送完了まで保持します。連続する同一ボタン状態の移動は最新座標へ集約し、押下・解放の変化は FIFO 順で処理します。また、ホストからの heartbeat を含む有効パケットが 2.5 秒途絶えた状態で絶対ボタンが押下中なら、最後の座標で解放レポートを生成します。USB の切断・再列挙時には未送信クリックを破棄し、再接続後に古い操作を再生しません。
 
 水平スクロール (wheel_h) は STM32duino 内蔵 HID Composite が非サポートのため、受信しても破棄されます。
 
@@ -101,6 +103,19 @@ BP2 の HID Composite は **3 つの HID インターフェース**を露出し�
 
 Phase 3 BP2 firmware は **3-interface HID composite** (Keyboard + Relative Mouse + Absolute Mouse) を公開します。インターフェース数が変わるので、Windows が古い 2-interface ディスクリプタをキャッシュしていると、初回接続時に「不明な USB デバイス」になることがあります。
 
+`Code 43 / 無効なデバイス記述子` が出る場合は、キャッシュだけでなくビルド時のリンク結果も
+確認してください。旧方式の `--allow-multiple-definition` ではSTM32duino側の2-interface
+実装が先に採用され、4 endpoint用に拡張された配列の末尾がゼロのままEP0設定を上書きする
+ことがありました。現行ビルドはリンク直前にフレームワーク側の重複USBオブジェクトをweak化し、
+リポジトリ側の3-interface実装を確実に採用します。BP2ビルド時に次の3行が表示されることを
+確認してください。
+
+```text
+Weakened framework USB object: USBDevice\src\usbd_desc.c.o
+Weakened framework USB object: USBDevice\src\usbd_ep_conf.c.o
+Weakened framework USB object: USBDevice\src\hid\usbd_hid_composite.c.o
+```
+
 Phase 3 firmware を書き込んだ後、ターゲット PC で以下を試してください:
 
 1. **USB ポートを差し替える** — 別ポートに挿すと Windows が新しいディスクリプタを読み直す
@@ -111,23 +126,47 @@ VID/PID/Product string (`046D:C52B` / `Logitech` / `USB Receiver`) は Logitech 
 
 ---
 
+## 3.6. 同一 PC での無人ハードウェアループバック検証
+
+BP1 の USB CDC と BP2 の USB HID を同じ Windows PC に接続すると、専用ハーネスで
+`PC -> BP1 CDC -> UART -> BP2 -> USB HID -> PC Raw Input` を人手なしで検証できます。
+通常の Simple KVM アプリは終了し、BP1–BP2 間の UART と GND を接続した状態で実行します。
+
+```powershell
+python tools/hardware_loopback.py
+```
+
+ハーネスは BP1 を `0483:5740` の COM ポート、BP2 の絶対マウスを
+`046D:C52B / MI_02` の Raw Input デバイスとして個別に識別します。実行中は誤クリックを
+避けるため空の全画面ウィンドウを前面に出し、終了時にはボタン解放レポートを送信して
+元のカーソル位置へ戻します。次をすべて確認できた場合だけ `LOOPBACK_E2E_PASS` になります。
+
+- 5 地点の絶対 Raw Input 座標と Windows カーソル座標
+- `move -> left down -> left up` のデバイス固有イベント順序
+- 連続 200 座標送信後に最終座標へ収束し、古い座標へ戻らないこと
+- ボタン押下後、UART 無通信時に BP2 が約 2.5 秒で解放すること
+
+結果は `logs/hardware_loopback/<timestamp>/result.json` に保存され、このディレクトリは
+Git 管理外です。BP2 が見つからない場合も、Raw Input 一覧と `pnputil` の問題デバイス一覧を
+保存して `BP2_HID_ENUM_FAIL` で終了します。`Code 43 / 無効なデバイス記述子` の場合は、
+別 USB ポートへの差し替え、またはデバイス マネージャーで該当する不明な USB デバイスを
+削除してから再接続し、再度ハーネスを実行してください。
+
+---
+
 ## 4. Python アプリのセットアップ
 
 ### 4-1. 依存パッケージのインストール
 
 ```powershell
-cd app
 python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install -e .
 ```
 
 ### 4-2. アプリの起動
 
 ```powershell
-cd app
-.venv\Scripts\activate
-python main.py
+.venv\Scripts\python.exe -m app
 ```
 
 ### 4-3. 設定手順
@@ -135,16 +174,45 @@ python main.py
 1. File → Settings を開く
 2. **Serial Port**: BluePill #1 が接続されている COM ポートを選択
    - デバイスマネージャで「ポート (COM と LPT)」→「STMicroelectronics Virtual COM Port」を確認
-3. **Capture Device**: HDMI キャプチャドングルのデバイス番号を選択
-   - PC に他のカメラがある場合は Device 1 以降になることがあります
+3. **Capture Device**: HDMI キャプチャドングルのDirectShowデバイス名を選択
 4. **Aspect Ratio**: 映像のアスペクト比モードを選択
    - **Maintain Aspect Ratio**: アスペクト比を維持（黒帯あり）
    - **Stretch to Fill**: 画面全体に引き伸ばし
-5. **Mouse Speed**: マウスカーソル速度を 0.5x 〜 2.0x の範囲で調整（0.1 刻み）
-6. OK をクリック → 映像が表示されます
+5. **Mouse Speed**: Relative / Hybrid のマウスカーソル速度を 0.5x 〜 2.0x の範囲で調整（Absoluteには適用されません）
+6. **Mouse Mode**: `Relative`、`Hybrid`、`Absolute` から選択
+7. Phase 3 BP2 firmwareで `Hybrid` / `Absolute` を使う場合だけ、**Firmware supports absolute HID** をオンにする
+8. OK をクリック → 映像が表示されます
 
 > **設定は自動的に保存**され、次回起動時に復元されます。
 > COM ポートとキャプチャデバイスが前回と同じ状態で接続されていれば、起動時に自動接続されます。
+
+### 4-4. Absoluteモードの操作境界
+
+Absoluteモードでは、ホストカーソル位置そのものをターゲットの絶対座標へ変換するため、Relative / Hybridのような中央固定やカーソル非表示を行いません。KVM有効中でもsimple-kvmの外へカーソルを移動し、ホスト側の別ウィンドウへ移れます。
+
+誤入力を防ぐため、物理キーボードのHID転送は**ホストカーソルがsimple-kvmウィンドウ内にある間だけ**有効です。
+
+- カーソルがウィンドウ外へ出ると、ターゲット側へ新しいキー入力を送りません
+- 内側で押したキーやShift/Ctrl/Altを保持したまま外へ出た場合は、境界を出た時点で全キー解放レポートを送ります
+- この解放ではKVM有効状態やAbsoluteマウス状態を解除しません
+- Raw InputとQtキーイベントの両経路に同じ境界判定を適用します
+- `Esc`によるKVM解除は境界外でも引き続き利用できます
+
+### 4-5. ターゲットPCを含む実機検証
+
+最初はターゲットPCをプライマリ単一画面にし、空のデスクトップや白紙キャンバスで確認してください。
+
+1. ターゲットPCでBP2が`046D:C52B`として列挙され、Keyboard / Relative Mouse / Absolute Mouseに警告がないことを確認する
+2. simple-kvmのステータスが`Connected: <COM> | FPS: <値>`になることを確認する
+3. 映像の中央と周辺をクリックし、ターゲットカーソルが先に同じ位置へ移動してからクリックされることを確認する
+4. 高速移動後、最終位置へ収束して古い位置へ戻らないことを確認する
+5. simple-kvm内でターゲットへキー入力できることを確認する
+6. カーソルをホスト側の別ウィンドウへ移して入力し、ターゲットへ同じキーが送られないことを確認する
+7. Shiftなどを押したままカーソルを外へ出し、ターゲット側でキーが押しっぱなしにならないことを確認する
+
+2026-09-02時点で、BP1をホストPC、BP2をWindowsターゲットPCへ接続し、HDMI映像をホストへ戻す構成で、driverless HID列挙、絶対座標移動とクリック、カーソル境界によるキーボード転送停止・解放を実機確認済みです。同一ホストの`tools/hardware_loopback.py`では、5地点の座標、`move -> down -> up`、高速な200座標入力のlatest-wins、約2.5秒の無通信時ボタン解放が`LOOPBACK_E2E_PASS`になっています。
+
+multi-monitor、mixed DPI、non-primary monitor captureはこの確認範囲に含みません。
 
 ---
 
@@ -153,8 +221,9 @@ python main.py
 ### KVM フォーカスモードの使い方
 
 - VideoWidget（映像エリア）をクリック → KVM フォーカスモード ON
-  - マウスカーソルが非表示になります
-  - キーボード・マウス操作がターゲット PC へ転送されます
+  - Relative / Hybridではマウスカーソルを非表示にして中央へ固定します
+  - Absoluteではカーソルを表示したまま、映像内の位置をターゲットの絶対座標へ送ります
+  - 物理キーボードはカーソルがsimple-kvmウィンドウ内にある場合だけ転送します
 - **Esc キー** を押す → フォーカスモード解除
 
 ### 全画面表示の使い方
@@ -185,6 +254,7 @@ python main.py
 
 - File → Settings の「Mouse Speed」スライダーで調整
 - スライダーを右に動かすほどカーソルが速く動きます
+- Relative / Hybridだけに適用され、Absoluteの座標には適用されません
 - 設定値は即座に反映され、次回起動時も維持されます
 
 ### Amical音声入力の転送
@@ -203,7 +273,7 @@ AmicalがホストPC上で生成した日本語の文字起こしを、ローマ
 - 英数字とスペースだけを送信し、句読点や記号は除外します
 - Enterは自動送信しません
 - ターゲットPC側の受信ヘルパーやIMEは不要です
-- Esc、KVMフォーカス解除、切断、または新しいF9操作で送信中の文章をキャンセルできます
+- Esc、KVMフォーカス解除、カーソルのウィンドウ外移動、切断、または新しいF9操作で送信中の文章をキャンセルできます
 - Amicalを使わない場合は設定をオフにするとF9が通常どおりターゲットへ転送されます
 
 ### クリップボードテキストのBase64送信
@@ -243,8 +313,11 @@ AmicalがホストPC上で生成した日本語の文字起こしを、ローマ
 |------|---------|
 | COM ポートが見えない | BP1 の USB ケーブルを抜き差し。ビルドフラグ `PIO_FRAMEWORK_ARDUINO_ENABLE_CDC` が有効か確認 |
 | ターゲット PC で HID が認識されない | BP2 のビルドフラグ `USBD_USE_HID_COMPOSITE` が有効か確認。書き込み後 3 秒間のエニュメレーション待機が完了するまで待つ |
-| 映像が表示されない | Device インデックスを変更して試す。他のカメラアプリを終了する |
+| BP2 が Code 43（無効なデバイス記述子）になる | BP2をクリーンビルドし、上記3件の `Weakened framework USB object` が表示された修正版を書き込む。正常時は `046D:C52B` の MI_00〜MI_02 が列挙される |
+| 映像が表示されない | Settingsで正しいDirectShowデバイス名を選び、他のカメラアプリを終了する |
 | キー入力が届かない | UART クロス接続（PA9↔PA10）を確認 |
+| ホスト側の別ウィンドウへ入力するとターゲットにも入力される | Absoluteモード対応版のクライアントか確認。物理キー転送はカーソルがsimple-kvmウィンドウ内にある場合だけ有効 |
+| カーソルをsimple-kvm外へ出した後、ターゲットのキーが押しっぱなしになる | クライアントを最新版へ更新。境界を出た時点で全キー解放レポートが送られることを確認 |
 | Amicalの文章が転送されない | Input → Amical Romaji Forwardingがオンか、KVMフォーカス中か、シリアル接続済みかを確認 |
 | Base64の `+` や `=` が別の文字になる | Send Clipboard as Base64ダイアログで、ターゲットPCと同じJapanese (JIS)／US配列を選ぶ |
 | Base64送信を中断した後に復号できない | 途中までの受信バッファを破棄し、最初から再送する |
