@@ -6,10 +6,19 @@
 #include "usbd_desc.h"
 #include "usbd_ep_conf.h"
 #include "audio_usb_out.h"
+#include <string.h>
 
 #define AUDIO_CONTROL_INTERFACE  0x02U
 #define AUDIO_STREAM_INTERFACE   0x03U
 
+#if defined(__GNUC__)
+#define SIMPLE_KVM_AUDIO_DESCRIPTOR_USED \
+  __attribute__((used, externally_visible))
+#else
+#define SIMPLE_KVM_AUDIO_DESCRIPTOR_USED
+#endif
+
+SIMPLE_KVM_AUDIO_DESCRIPTOR_USED
 const uint8_t simple_kvm_bp1_audio_config_descriptor[174] = {
   0x09, 0x02, 0xAE, 0x00, 0x04, 0x01, 0x00, 0x80, 0x32,
 
@@ -54,10 +63,42 @@ typedef struct {
 static USBD_CDC_HandleTypeDef g_cdc;
 static AudioOutUsbState g_audio_out;
 
+static void __attribute__((noinline, noclone))
+audio_copy_descriptor(uint8_t *destination, const uint8_t *source,
+                      uint16_t length)
+{
+  memcpy(destination, source, length);
+}
+
 static uint8_t *audio_get_config(uint16_t *length)
 {
+  /* The STM32 USB core normalizes the descriptor type in-place after this
+   * callback returns.  Keep the audited canonical image in flash and hand the
+   * core a writable transfer copy instead of casting away const. */
+  static uint8_t config_descriptor[sizeof(simple_kvm_bp1_audio_config_descriptor)];
+  audio_copy_descriptor(config_descriptor,
+                        simple_kvm_bp1_audio_config_descriptor,
+                        (uint16_t)sizeof(config_descriptor));
   *length = (uint16_t)sizeof(simple_kvm_bp1_audio_config_descriptor);
-  return (uint8_t *)(uintptr_t)simple_kvm_bp1_audio_config_descriptor;
+  return config_descriptor;
+}
+
+/* USB 2.0 hosts may ask a full-speed-only device for the other-speed
+ * configuration after reading the Device Qualifier.  It is the same layout,
+ * but the descriptor type must be 0x07 (OTHER_SPEED_CONFIGURATION), not 0x02.
+ * Keep one canonical configuration image and materialize this response only
+ * when requested so the two descriptors cannot drift. */
+static uint8_t g_other_speed_descriptor[
+    sizeof(simple_kvm_bp1_audio_config_descriptor)];
+
+static uint8_t *audio_get_other_speed(uint16_t *length)
+{
+  audio_copy_descriptor(g_other_speed_descriptor,
+                        simple_kvm_bp1_audio_config_descriptor,
+                        (uint16_t)sizeof(g_other_speed_descriptor));
+  g_other_speed_descriptor[1] = 0x07U;
+  *length = (uint16_t)sizeof(g_other_speed_descriptor);
+  return g_other_speed_descriptor;
 }
 
 static uint8_t *audio_get_qualifier(uint16_t *length)
@@ -314,7 +355,7 @@ USBD_ClassTypeDef USBD_CDC = {
   NULL,
   audio_get_config,
   audio_get_config,
-  audio_get_config,
+  audio_get_other_speed,
   audio_get_qualifier,
 };
 
