@@ -166,3 +166,19 @@ def test_audio_profiles_keep_legacy_profiles_available():
         "bluepill2_audio",
     ):
         assert f"[env:{environment}]" in text
+
+
+def test_audio_profiles_raise_usb_core_interface_limit():
+    text = (ROOT / "platformio.ini").read_text(encoding="utf-8")
+
+    def section(name: str) -> str:
+        match = re.search(
+            rf"^\[env:{re.escape(name)}\].*?(?=^\[env:|\Z)",
+            text,
+            re.DOTALL | re.MULTILINE,
+        )
+        assert match, name
+        return match.group(0)
+
+    assert "-D USBD_MAX_NUM_INTERFACES=4" in section("bluepill1_audio")
+    assert "-D USBD_MAX_NUM_INTERFACES=5" in section("bluepill2_audio")
