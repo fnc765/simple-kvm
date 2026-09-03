@@ -83,6 +83,14 @@ def test_bp1_cdc_uac1_descriptor_contract():
     assert any(desc[2:6] == bytes([0x82, 0x02, 64, 0]) for desc in endpoints)
     assert any(desc[2:6] == bytes([0x83, 0x03, 8, 0]) for desc in endpoints)
 
+    source = (ROOT / "firmware" / "bluepill1" /
+              "usbd_cdc_audio_patch.c").read_text(encoding="utf-8")
+    assert "static uint8_t config_descriptor" in source
+    assert "audio_copy_descriptor(config_descriptor" in source
+    assert "simple_kvm_bp1_audio_config_descriptor" in source
+    assert "audio_get_other_speed" in source
+    assert "g_other_speed_descriptor[1] = 0x07U" in source
+
 
 def test_bp2_hid_uac1_descriptor_contract():
     data = _c_byte_array(
@@ -101,6 +109,14 @@ def test_bp2_hid_uac1_descriptor_contract():
     endpoints = _endpoints(data)
     for endpoint in (0x81, 0x82, 0x83):
         assert any(desc[2] == endpoint and desc[3] == 3 for desc in endpoints)
+
+    source = (ROOT / "firmware" / "bluepill2" /
+              "usbd_hid_audio_composite_patch.c").read_text(encoding="utf-8")
+    assert "static uint8_t config_descriptor" in source
+    assert "audio_copy_descriptor(config_descriptor" in source
+    assert "simple_kvm_bp2_audio_config_descriptor" in source
+    assert "audio_get_other_speed" in source
+    assert "g_other_speed_descriptor[1] = 0x07U" in source
 
 
 def test_audio_pma_budgets_are_exact_and_non_overlapping():

@@ -4,6 +4,7 @@
 #include "usbd_hid_composite_patch.h"
 #include "usbd_ctlreq.h"
 #include "audio_usb_mic.h"
+#include <string.h>
 
 /* build_src_flags renames the existing HID-only class.  This translation unit
  * owns the public symbol registered by STM32duino's interface layer. */
@@ -16,8 +17,16 @@
 
 extern USBD_ClassTypeDef SIMPLE_KVM_HID_ONLY_CLASS;
 
+#if defined(__GNUC__)
+#define SIMPLE_KVM_AUDIO_DESCRIPTOR_USED \
+  __attribute__((used, externally_visible))
+#else
+#define SIMPLE_KVM_AUDIO_DESCRIPTOR_USED
+#endif
+
 /* Plain byte literals are intentional: source and ELF descriptor audits read
  * this exact symbol without relying on preprocessor arithmetic. */
+SIMPLE_KVM_AUDIO_DESCRIPTOR_USED
 const uint8_t simple_kvm_bp2_audio_config_descriptor[183] = {
   0x09, 0x02, 0xB7, 0x00, 0x05, 0x01, 0x00, 0x80, 0x31,
 
@@ -64,10 +73,40 @@ typedef struct {
 
 static AudioMicUsbState g_audio_mic;
 
+static void __attribute__((noinline, noclone))
+audio_copy_descriptor(uint8_t *destination, const uint8_t *source,
+                      uint16_t length)
+{
+  memcpy(destination, source, length);
+}
+
 static uint8_t *audio_get_config(uint16_t *length)
 {
+  /* The STM32 USB core normalizes the descriptor type in-place after this
+   * callback returns.  Keep the audited canonical image in flash and hand the
+   * core a writable transfer copy instead of casting away const. */
+  static uint8_t config_descriptor[sizeof(simple_kvm_bp2_audio_config_descriptor)];
+  audio_copy_descriptor(config_descriptor,
+                        simple_kvm_bp2_audio_config_descriptor,
+                        (uint16_t)sizeof(config_descriptor));
   *length = (uint16_t)sizeof(simple_kvm_bp2_audio_config_descriptor);
-  return (uint8_t *)(uintptr_t)simple_kvm_bp2_audio_config_descriptor;
+  return config_descriptor;
+}
+
+/* Return a valid Other-Speed Configuration descriptor for USB 2.0 hosts.
+ * The payload is shared with the full-speed image; only bDescriptorType
+ * changes from Configuration (0x02) to Other-Speed Configuration (0x07). */
+static uint8_t g_other_speed_descriptor[
+    sizeof(simple_kvm_bp2_audio_config_descriptor)];
+
+static uint8_t *audio_get_other_speed(uint16_t *length)
+{
+  audio_copy_descriptor(g_other_speed_descriptor,
+                        simple_kvm_bp2_audio_config_descriptor,
+                        (uint16_t)sizeof(g_other_speed_descriptor));
+  g_other_speed_descriptor[1] = 0x07U;
+  *length = (uint16_t)sizeof(g_other_speed_descriptor);
+  return g_other_speed_descriptor;
 }
 
 static uint8_t *audio_get_qualifier(uint16_t *length)
@@ -200,7 +239,7 @@ USBD_ClassTypeDef USBD_COMPOSITE_HID = {
   NULL,
   audio_get_config,
   audio_get_config,
-  audio_get_config,
+  audio_get_other_speed,
   audio_get_qualifier,
 };
 
