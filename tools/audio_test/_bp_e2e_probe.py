@@ -37,6 +37,7 @@ from tools.bp2_identity import bp2_audio_pnp_preflight  # noqa: E402
 BP1_AUDIO_VID = 0x0483
 BP1_AUDIO_PID = 0xA1D0
 BP2_AUDIO_PRODUCT = "USB Receiver"
+BP1_RENDER_TOKENS = ("BP1 Audio Dev", "USB Audio Device")
 BP1_PORT_ENV = "BP_E2E_PORT"
 RENDER_ENDPOINT_ENV = "BP_E2E_RENDER_ID"
 CAPTURE_ENDPOINT_ENV = "BP_E2E_CAPTURE_ID"
@@ -234,10 +235,11 @@ def _select_endpoint(entries, env_name, role, token=None, allow_single=False):
             )
         return override
 
+    tokens = (token,) if isinstance(token, str) else tuple(token or ())
     candidates = [
         endpoint_id
         for endpoint_id, friendly in entries
-        if token and token.casefold() in friendly.casefold()
+        if any(candidate.casefold() in friendly.casefold() for candidate in tokens)
     ]
     if len(candidates) == 1:
         return candidates[0]
@@ -837,7 +839,7 @@ def main():
     capture_entries = _audio_endpoint_inventory(E_DATA_FLOW_CAPTURE)
     render_id = _select_endpoint(
         render_entries, RENDER_ENDPOINT_ENV, "BP1 render endpoint",
-        token="BP1 Audio Dev", allow_single=True,
+        token=BP1_RENDER_TOKENS, allow_single=True,
     )
     capture_id = _select_endpoint(
         capture_entries, CAPTURE_ENDPOINT_ENV, "BP2 capture endpoint",

@@ -162,7 +162,7 @@ audio profileが`046D:C52C`、legacy profileが`046D:C52B`であることを確�
 使用しません。実行時に次を確認してから試験を開始します。
 
 - BP1 CDC: `0483:A1D0` が1ポートだけ存在すること
-- BP1 render: Friendly Name の `BP1 Audio Dev`（該当しない場合は active render が1件だけ）
+- BP1 render: Friendly Name の `BP1 Audio Dev` または `USB Audio Device`（該当しない場合は active render が1件だけ）
 - BP2 capture: Friendly Name に `USB Receiver` を含む active endpoint が1件だけ存在すること
 - BP2 USB: `046D:C52C`、`USB Receiver`、`MI_00`〜`MI_03` の PnP preflight
 

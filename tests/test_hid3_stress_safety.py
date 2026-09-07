@@ -89,6 +89,7 @@ def test_audio_probe_discovers_current_cdc_and_wasapi_devices_fail_closed():
     assert "BP1_SERIAL_PORT" in probe
     assert "BP1_RENDER" in probe
     assert "BP2_CAPTURE" in probe
+    assert "BP1_RENDER_TOKENS" in probe
     # These were stale machine-specific values; the harness must not silently
     # fall back to them when Windows assigns a different port or endpoint ID.
     assert "COM11" not in probe
