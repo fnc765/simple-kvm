@@ -5,11 +5,12 @@ import struct
 import sys
 import time
 from ctypes import POINTER, byref, c_int, c_longlong, c_uint, c_uint16
-from ctypes import c_uint32, c_uint64, c_void_p, c_wchar_p, cast, memmove
+from ctypes import c_uint32, c_uint64, c_ubyte, c_void_p, c_wchar_p, cast, memmove
 from pathlib import Path
 
 import numpy as np
 import serial
+from serial.tools import list_ports
 from comtypes import COMMETHOD, GUID, HRESULT, IUnknown, CoCreateInstance
 
 
@@ -33,6 +34,37 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.bp2_identity import bp2_audio_pnp_preflight  # noqa: E402
+BP1_AUDIO_VID = 0x0483
+BP1_AUDIO_PID = 0xA1D0
+BP2_AUDIO_PRODUCT = "USB Receiver"
+BP1_PORT_ENV = "BP_E2E_PORT"
+RENDER_ENDPOINT_ENV = "BP_E2E_RENDER_ID"
+CAPTURE_ENDPOINT_ENV = "BP_E2E_CAPTURE_ID"
+_VT_LPWSTR = 31
+_PROPVARIANT_BYTES = c_ubyte * 24
+
+
+class PROPERTYKEY(ctypes.Structure):
+    _fields_ = [("fmtid", GUID), ("pid", c_uint)]
+
+
+class IPropertyStore(IUnknown):
+    _iid_ = GUID("{886D8EEF-8CF2-4446-8D02-CDBA1DBDCF99}")
+    _methods_ = [
+        COMMETHOD([], HRESULT, "GetCount",
+                  (["out"], POINTER(c_uint), "cProps")),
+        COMMETHOD([], HRESULT, "GetAt",
+                  (["in"], c_uint, "iProp"),
+                  (["out"], POINTER(PROPERTYKEY), "pkey")),
+        COMMETHOD([], HRESULT, "GetValue",
+                  (["in"], POINTER(PROPERTYKEY), "key"),
+                  (["out"], POINTER(_PROPVARIANT_BYTES), "pv")),
+    ]
+
+
+_PKEY_DEVICE_FRIENDLY_NAME = PROPERTYKEY(
+    GUID("{A45C254E-DF1C-4EFD-8020-67D146A850E0}"), 14
+)
 
 
 class WAVEFORMATEX(ctypes.Structure):
@@ -156,6 +188,102 @@ def get_devices(flow):
     return result
 
 
+def _friendly_name(device) -> str:
+    """Read an active WASAPI endpoint's Windows friendly name."""
+    raw_store = device.OpenPropertyStore(0)
+    store = _obj(raw_store, IPropertyStore)
+    raw_value = store.GetValue(byref(_PKEY_DEVICE_FRIENDLY_NAME))
+    try:
+        raw_bytes = bytes(raw_value)
+        variant_type = int.from_bytes(raw_bytes[:2], "little")
+        if variant_type != _VT_LPWSTR:
+            return ""
+        pointer = int.from_bytes(raw_bytes[8:16], "little")
+        return ctypes.wstring_at(pointer) if pointer else ""
+    finally:
+        windll = getattr(ctypes, "windll", None)
+        if windll is not None:
+            clear = windll.ole32.PropVariantClear
+            clear.argtypes = [POINTER(_PROPVARIANT_BYTES)]
+            clear.restype = ctypes.c_long
+            clear(byref(raw_value))
+
+
+def _audio_endpoint_inventory(flow):
+    return [
+        (endpoint_id, _friendly_name(device))
+        for endpoint_id, device in get_devices(flow)
+    ]
+
+
+def _format_endpoint_inventory(entries) -> str:
+    return "; ".join(
+        f"{endpoint_id} [{friendly or '<unknown>'}]"
+        for endpoint_id, friendly in entries
+    )
+
+
+def _select_endpoint(entries, env_name, role, token=None, allow_single=False):
+    override = os.environ.get(env_name, "").strip()
+    endpoint_ids = {endpoint_id for endpoint_id, _ in entries}
+    if override:
+        if override not in endpoint_ids:
+            raise RuntimeError(
+                f"{role} override {env_name}={override!r} is not active; "
+                f"inventory={_format_endpoint_inventory(entries)}"
+            )
+        return override
+
+    candidates = [
+        endpoint_id
+        for endpoint_id, friendly in entries
+        if token and token.casefold() in friendly.casefold()
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates and allow_single and len(entries) == 1:
+        return entries[0][0]
+    raise RuntimeError(
+        f"could not uniquely resolve {role}; set {env_name}; "
+        f"inventory={_format_endpoint_inventory(entries)}"
+    )
+
+
+def resolve_bp1_serial_port() -> str:
+    """Resolve BP1's CDC port by VID/PID, with a validated override."""
+    ports = list(list_ports.comports())
+    override = os.environ.get(BP1_PORT_ENV, "").strip()
+    candidates = [
+        port for port in ports
+        if port.vid == BP1_AUDIO_VID and port.pid == BP1_AUDIO_PID
+    ]
+    if override:
+        selected = next(
+            (port for port in ports
+             if port.device.casefold() == override.casefold()),
+            None,
+        )
+        if selected is None:
+            raise RuntimeError(
+                f"{BP1_PORT_ENV}={override!r} is not present; "
+                f"ports={[port.device for port in ports]}"
+            )
+        if selected.vid != BP1_AUDIO_VID or selected.pid != BP1_AUDIO_PID:
+            raise RuntimeError(
+                f"{BP1_PORT_ENV}={override!r} is not BP1 audio "
+                f"VID:PID={BP1_AUDIO_VID:04X}:{BP1_AUDIO_PID:04X}"
+            )
+        return selected.device
+    if len(candidates) != 1:
+        inventory = [
+            f"{port.device} VID:PID={port.vid!s}:{port.pid!s}"
+            for port in ports
+        ]
+        raise RuntimeError(
+            "BP1 audio CDC port is not uniquely present; "
+            f"set {BP1_PORT_ENV}; inventory={inventory}"
+        )
+    return candidates[0].device
 def activate_client(endpoint_id):
     enum = CoCreateInstance(CLSID_MMDEVICE_ENUMERATOR, IMMDeviceEnumerator,
                              clsctx=CLSCTX_ALL)
@@ -415,16 +543,31 @@ def _resampled_corr(captured, reference, offset, step, phase, count=None):
 def find_offset(captured, reference):
     """Find the first preamble with ASRC phase/rate correction.
 
-    The search is intentionally local to the first activity transition.  A
-    later pseudo-random segment can produce a larger accidental correlation if
+    The search stays local to the first sustained activity transition.  A
+    Windows USB audio stream can expose a few stale non-zero samples while the
+    endpoint changes alternate settings; treating such a short glitch as the
+    preamble would make the rest of the waveform look lost.  A later
+    pseudo-random segment can still produce a larger accidental correlation if
     the whole recording is searched at the nominal 48 kHz grid.
     """
     if len(captured) <= len(reference):
         return None, 0.0, 1.0, 0.0
-    activity = np.flatnonzero(np.abs(captured.astype(np.int32)) > 1000)
-    if len(activity) == 0:
-        return None, 0.0, 1.0, 0.0
-    first = int(activity[0])
+    # Only inspect the startup window: a 60-minute capture can contain hundreds
+    # of megabytes, and the preamble is emitted within the first few seconds.
+    search_limit = min(len(captured), 131072)
+    head = captured[:search_limit].astype(np.int32, copy=False)
+    active = np.abs(head) > 1000
+    edges = np.diff(np.concatenate(([False], active, [False])).astype(np.int8))
+    starts = np.flatnonzero(edges == 1)
+    ends = np.flatnonzero(edges == -1)
+    sustained = starts[(ends - starts) >= max(64, min(len(reference) // 4, 128))]
+    if len(sustained):
+        first = int(sustained[0])
+    else:
+        activity = np.flatnonzero(active)
+        if len(activity) == 0:
+            return None, 0.0, 1.0, 0.0
+        first = int(activity[0])
     offsets = range(max(0, first - 16), min(len(captured), first + 17))
     # The ASRC nominal clamp is +/-2000 ppm.  A wider search also covers the
     # startup controller transient before the ring has converged.
@@ -690,18 +833,26 @@ def main():
         raise RuntimeError(
             f"BP2 audio identity preflight failed: {identity['reason']}"
         )
-    render_ids = [x for x, _ in get_devices(E_DATA_FLOW_RENDER)]
-    capture_ids = [x for x, _ in get_devices(E_DATA_FLOW_CAPTURE)]
-    render_id = next(x for x in render_ids if "081A7D3C" in x.upper())
-    capture_id = next(x for x in capture_ids if "A627190E" in x.upper())
+    render_entries = _audio_endpoint_inventory(E_DATA_FLOW_RENDER)
+    capture_entries = _audio_endpoint_inventory(E_DATA_FLOW_CAPTURE)
+    render_id = _select_endpoint(
+        render_entries, RENDER_ENDPOINT_ENV, "BP1 render endpoint",
+        token="BP1 Audio Dev", allow_single=True,
+    )
+    capture_id = _select_endpoint(
+        capture_entries, CAPTURE_ENDPOINT_ENV, "BP2 capture endpoint",
+        token=BP2_AUDIO_PRODUCT,
+    )
+    port_name = resolve_bp1_serial_port()
+    print("BP1_SERIAL_PORT", port_name)
     print("BP1_RENDER", render_id)
     print("BP2_CAPTURE", capture_id)
 
-    port = serial.Serial("COM11", 115200, timeout=0.001)
+    port = serial.Serial(port_name, 115200, timeout=0.001)
     port.reset_input_buffer()
     if len(sys.argv) > 1 and sys.argv[1] == "--capture-only":
         send_control(port, 0x26, b"\x01", drain=0.05)
-        capture_id = next(x for x in capture_ids if "A627190E" in x.upper())
+
         capture_client = activate_client(capture_id)
         exclusive = os.environ.get("BP_E2E_EXCLUSIVE") == "1"
         capture_mix = (not exclusive and

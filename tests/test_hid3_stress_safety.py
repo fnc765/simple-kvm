@@ -75,3 +75,31 @@ def test_audio_hid_harness_uses_c52c_and_pnp_preflight():
         encoding="utf-8"
     )
     assert "BP2_PID = 0xC52B" in legacy
+
+
+def test_audio_probe_discovers_current_cdc_and_wasapi_devices_fail_closed():
+    probe = (REPO_ROOT / "tools" / "audio_test" / "_bp_e2e_probe.py").read_text(
+        encoding="utf-8"
+    )
+    assert "list_ports.comports()" in probe
+    assert "BP1_AUDIO_VID = 0x0483" in probe
+    assert "BP1_AUDIO_PID = 0xA1D0" in probe
+    assert "resolve_bp1_serial_port" in probe
+    assert "_select_endpoint" in probe
+    assert "BP1_SERIAL_PORT" in probe
+    assert "BP1_RENDER" in probe
+    assert "BP2_CAPTURE" in probe
+    # These were stale machine-specific values; the harness must not silently
+    # fall back to them when Windows assigns a different port or endpoint ID.
+    assert "COM11" not in probe
+    assert "081A7D3C" not in probe
+    assert "A627190E" not in probe
+
+
+def test_audio_probe_ignores_short_startup_glitches_for_alignment():
+    probe = (REPO_ROOT / "tools" / "audio_test" / "_bp_e2e_probe.py").read_text(
+        encoding="utf-8"
+    )
+    assert "search_limit = min(len(captured), 131072)" in probe
+    assert "sustained = starts" in probe
+    assert "max(64, min(len(reference) // 4, 128))" in probe
