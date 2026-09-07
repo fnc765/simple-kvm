@@ -4,13 +4,12 @@
 
 namespace simple_kvm::audio {
 
-AudioRing::AudioRing() : samples_{}, head_(0U), tail_(0U), count_(0U) {}
+AudioRing::AudioRing() : samples_{}, head_(0U), tail_(0U) {}
 
 void AudioRing::clear()
 {
   head_ = 0U;
   tail_ = 0U;
-  count_ = 0U;
 }
 
 bool AudioRing::push_one(int16_t sample)
@@ -18,9 +17,8 @@ bool AudioRing::push_one(int16_t sample)
   if (full()) {
     return false;
   }
-  samples_[head_] = sample;
-  head_ = static_cast<uint16_t>((head_ + 1U) & (kRingCapacity - 1U));
-  ++count_;
+  samples_[static_cast<uint16_t>(head_ & (kRingCapacity - 1U))] = sample;
+  head_ = static_cast<uint16_t>(head_ + 1U);
   return true;
 }
 
@@ -29,25 +27,30 @@ uint16_t AudioRing::push(const int16_t* samples, uint16_t count)
   if (samples == nullptr) {
     return 0U;
   }
-  uint16_t written = 0U;
-  while (written < count && push_one(samples[written])) {
-    ++written;
+  const uint16_t available = free_space();
+  const uint16_t written = count < available ? count : available;
+  const uint16_t start = head_;
+  for (uint16_t i = 0U; i < written; ++i) {
+    const uint16_t index = static_cast<uint16_t>(
+        (start + i) & static_cast<uint16_t>(kRingCapacity - 1U));
+    samples_[index] = samples[i];
   }
+  // Publish the new head only after all samples are visible to the consumer.
+  head_ = static_cast<uint16_t>(start + written);
   return written;
 }
 
 uint16_t AudioRing::discard(uint16_t count)
 {
-  const uint16_t discarded = count < count_ ? count : count_;
-  tail_ = static_cast<uint16_t>(
-      (tail_ + discarded) & static_cast<uint16_t>(kRingCapacity - 1U));
-  count_ = static_cast<uint16_t>(count_ - discarded);
+  const uint16_t available = fill();
+  const uint16_t discarded = count < available ? count : available;
+  tail_ = static_cast<uint16_t>(tail_ + discarded);
   return discarded;
 }
 
 int16_t AudioRing::peek(uint16_t offset) const
 {
-  if (offset >= count_) {
+  if (offset >= fill()) {
     return 0;
   }
   const uint16_t index = static_cast<uint16_t>(

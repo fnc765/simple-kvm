@@ -362,6 +362,34 @@ def test_main_cpp_queues_absolute_reports_instead_of_dropping_usb_busy():
     assert "status == USBD_OK" in text
 
 
+def test_audio_profile_queues_boot_hid_reports_while_audio_is_active():
+    text = _read("main.cpp")
+    assert "HID_REPORT_QUEUE_CAPACITY" in text
+    assert "hid_queued_service" in text
+    keyboard = re.search(
+        r"static\s+void\s+hid_send_keyboard\s*\([^)]*\)\s*\{(.+?)\n\}",
+        text,
+        re.DOTALL,
+    )
+    mouse = re.search(
+        r"static\s+void\s+hid_send_mouse\s*\([^)]*\)\s*\{(.+?)\n\}",
+        text,
+        re.DOTALL,
+    )
+    assert keyboard and "hid_queue_push" in keyboard.group(1)
+    assert mouse and "hid_queue_push" in mouse.group(1)
+    assert "USBD_HID_KEYBOARD_SendReport" not in keyboard.group(1)
+    assert "USBD_HID_MOUSE_SendReport" not in mouse.group(1)
+
+
+def test_audio_profile_exposes_boot_hid_idle_states_for_queued_service():
+    header = _read("usbd_hid_composite_patch.h")
+    source = _read("usbd_hid_composite_patch.c")
+    for name in ("HID_Composite_keyboard_isIdle", "HID_Composite_mouse_isIdle"):
+        assert name in header
+        assert name in source
+
+
 def test_main_cpp_has_fail_safe_absolute_button_release_timeout():
     text = _read("main.cpp")
     assert "ABS_INPUT_TIMEOUT_MS" in text

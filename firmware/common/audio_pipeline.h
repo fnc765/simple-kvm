@@ -57,6 +57,11 @@ class AudioReceivePipeline {
   uint32_t prefill_accumulated_;
   uint8_t last_usb_state_;
   bool have_source_time_;
+  // A session-start control frame is allowed a startup grace period.  The
+  // 3 ms source watchdog starts only after the first valid PCM frame, so a
+  // host that takes a few milliseconds to deliver its first USB packet does
+  // not permanently invalidate the otherwise valid session.
+  bool have_source_pcm_;
   bool have_usb_state_;
 };
 

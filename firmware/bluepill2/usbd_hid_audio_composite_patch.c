@@ -66,12 +66,33 @@ static const uint8_t kDeviceQualifier[10] = {
 };
 
 typedef struct {
-  uint8_t alt;
-  uint8_t tx_index;
+  volatile uint8_t alt;
+  volatile uint8_t tx_index;
+  volatile uint8_t packet_state[2];
   uint8_t packet[2][AUDIO_MIC_EPIN_SIZE];
 } AudioMicUsbState;
 
+enum {
+  AUDIO_PACKET_FREE = 0U,
+  AUDIO_PACKET_FILLING = 1U,
+  AUDIO_PACKET_READY = 2U,
+  AUDIO_PACKET_INFLIGHT = 3U,
+};
+
 static AudioMicUsbState g_audio_mic;
+static uint8_t g_audio_zero_packet[AUDIO_MIC_EPIN_SIZE];
+
+static uint32_t audio_irq_save(void)
+{
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  return primask;
+}
+
+static void audio_irq_restore(uint32_t primask)
+{
+  __set_PRIMASK(primask);
+}
 
 static void __attribute__((noinline, noclone))
 audio_copy_descriptor(uint8_t *destination, const uint8_t *source,
@@ -123,6 +144,8 @@ static void audio_close(USBD_HandleTypeDef *pdev)
   }
   g_audio_mic.alt = 0U;
   g_audio_mic.tx_index = 0U;
+  g_audio_mic.packet_state[0] = AUDIO_PACKET_FREE;
+  g_audio_mic.packet_state[1] = AUDIO_PACKET_FREE;
   bp2_audio_mic_on_alt(0U);
 }
 
@@ -136,15 +159,22 @@ static uint8_t audio_set_alt(USBD_HandleTypeDef *pdev, uint8_t alt)
   }
   audio_close(pdev);
   if (alt == 1U) {
+    memset(g_audio_zero_packet, 0, sizeof(g_audio_zero_packet));
+    memset(g_audio_mic.packet, 0, sizeof(g_audio_mic.packet));
     (void)USBD_LL_OpenEP(pdev, AUDIO_MIC_EPIN_ADDR, USBD_EP_TYPE_ISOC,
                          AUDIO_MIC_EPIN_SIZE);
     pdev->ep_in[AUDIO_MIC_EPIN_ADDR & 0x0FU].is_used = 1U;
     pdev->ep_in[AUDIO_MIC_EPIN_ADDR & 0x0FU].bInterval = 1U;
     g_audio_mic.alt = 1U;
+    g_audio_mic.tx_index = 0U;
+    g_audio_mic.packet_state[0] = AUDIO_PACKET_INFLIGHT;
+    g_audio_mic.packet_state[1] = AUDIO_PACKET_FREE;
     bp2_audio_mic_on_alt(1U);
-    bp2_audio_mic_fill_packet(g_audio_mic.packet[0], AUDIO_MIC_EPIN_SIZE);
+    /* Keep the SET_INTERFACE callback short.  The first packet is silence;
+     * the main loop prepares the following packets outside USB IRQ context. */
     (void)USBD_LL_Transmit(pdev, AUDIO_MIC_EPIN_ADDR,
-                           g_audio_mic.packet[0], AUDIO_MIC_EPIN_SIZE);
+                           g_audio_zero_packet, AUDIO_MIC_EPIN_SIZE);
+    bp2_audio_mic_note_packet();
   }
   return (uint8_t)USBD_OK;
 }
@@ -154,6 +184,8 @@ static uint8_t audio_init(USBD_HandleTypeDef *pdev, uint8_t cfgidx)
   const uint8_t result = SIMPLE_KVM_HID_ONLY_CLASS.Init(pdev, cfgidx);
   g_audio_mic.alt = 0U;
   g_audio_mic.tx_index = 0U;
+  g_audio_mic.packet_state[0] = AUDIO_PACKET_FREE;
+  g_audio_mic.packet_state[1] = AUDIO_PACKET_FREE;
   return result;
 }
 
@@ -209,14 +241,55 @@ static uint8_t audio_datain(USBD_HandleTypeDef *pdev, uint8_t epnum)
     return SIMPLE_KVM_HID_ONLY_CLASS.DataIn(pdev, epnum);
   }
   if (g_audio_mic.alt == 1U) {
-    g_audio_mic.tx_index ^= 1U;
-    bp2_audio_mic_fill_packet(g_audio_mic.packet[g_audio_mic.tx_index],
-                              AUDIO_MIC_EPIN_SIZE);
+    const uint8_t current = g_audio_mic.tx_index;
+    const uint8_t next = (uint8_t)(current ^ 1U);
+    const uint32_t primask = audio_irq_save();
+    g_audio_mic.packet_state[current] = AUDIO_PACKET_FREE;
+    const uint8_t ready =
+        g_audio_mic.packet_state[next] == AUDIO_PACKET_READY ? 1U : 0U;
+    g_audio_mic.packet_state[next] = AUDIO_PACKET_INFLIGHT;
+    g_audio_mic.tx_index = next;
+    audio_irq_restore(primask);
+    /* Audio rendering is deliberately not done here: this callback runs in
+     * the USB IRQ shared by all three HID endpoints. */
     (void)USBD_LL_Transmit(pdev, AUDIO_MIC_EPIN_ADDR,
-                           g_audio_mic.packet[g_audio_mic.tx_index],
+                           ready ? g_audio_mic.packet[next]
+                                 : g_audio_zero_packet,
                            AUDIO_MIC_EPIN_SIZE);
+    bp2_audio_mic_note_packet();
   }
   return (uint8_t)USBD_OK;
+}
+
+void bp2_audio_mic_service(void)
+{
+  if (g_audio_mic.alt != 1U) {
+    return;
+  }
+  for (uint8_t index = 0U; index < 2U; ++index) {
+    uint8_t claimed = 0U;
+    uint32_t primask = audio_irq_save();
+    if (g_audio_mic.alt == 1U &&
+        g_audio_mic.packet_state[index] == AUDIO_PACKET_FREE) {
+      g_audio_mic.packet_state[index] = AUDIO_PACKET_FILLING;
+      claimed = 1U;
+    }
+    audio_irq_restore(primask);
+    if (claimed == 0U) {
+      continue;
+    }
+
+    bp2_audio_mic_fill_packet(g_audio_mic.packet[index], AUDIO_MIC_EPIN_SIZE);
+
+    primask = audio_irq_save();
+    if (g_audio_mic.alt == 1U &&
+        g_audio_mic.packet_state[index] == AUDIO_PACKET_FILLING) {
+      g_audio_mic.packet_state[index] = AUDIO_PACKET_READY;
+    } else if (g_audio_mic.packet_state[index] == AUDIO_PACKET_FILLING) {
+      g_audio_mic.packet_state[index] = AUDIO_PACKET_FREE;
+    }
+    audio_irq_restore(primask);
+  }
 }
 
 static uint8_t audio_dataout(USBD_HandleTypeDef *pdev, uint8_t epnum)
