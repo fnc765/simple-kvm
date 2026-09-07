@@ -156,6 +156,41 @@ audio profileが`046D:C52C`、legacy profileが`046D:C52B`であることを確�
 
 ---
 
+### 3.5.2. audio + HID 同時試験のデバイス検出
+
+`tools/audio_test/_bp_e2e_probe.py` は、固定の COM 番号や WASAPI endpoint GUID を
+使用しません。実行時に次を確認してから試験を開始します。
+
+- BP1 CDC: `0483:A1D0` が1ポートだけ存在すること
+- BP1 render: Friendly Name の `BP1 Audio Dev`（該当しない場合は active render が1件だけ）
+- BP2 capture: Friendly Name に `USB Receiver` を含む active endpoint が1件だけ存在すること
+- BP2 USB: `046D:C52C`、`USB Receiver`、`MI_00`〜`MI_03` の PnP preflight
+
+必要な場合だけ、検出結果に表示された値を環境変数で明示できます。指定値も再検証され、
+一致しなければ fail-closed で停止します。
+
+```powershell
+$env:BP_E2E_PORT = "COM10"
+$env:BP_E2E_RENDER_ID = "{0.0.0.00000000}.{...}"
+$env:BP_E2E_CAPTURE_ID = "{0.0.1.00000000}.{...}"
+```
+
+60分の audio + 3-interface HID 試験は、画面を占有する input shield が前面に表示されている
+対話デスクトップで実行します。`HID3_CONTINUOUS_PASS` が出るまで試験完了とは扱いません。
+
+```powershell
+$log = "logs/hid3_continuous_60m_$(Get-Date -Format yyyyMMdd_HHmmss).log"
+$env:BP_E2E_RUN_SECONDS = "3600"
+.venv\Scripts\python.exe tools/audio_test/_bp_e2e_hid3_continuous.py 2>&1 |
+  Tee-Object -FilePath $log
+```
+
+input shield が前面を失った場合は入力注入を停止して fail-closed で終了します。試験中は別の
+ウィンドウをクリックせず、`HID3_CONTINUOUS_METRICS` と `AUDIO_SINGLE_HOST_PASS` の両方を
+ログで確認してください。
+
+---
+
 ## 3.6. 同一 PC での無人ハードウェアループバック検証
 
 BP1 の USB CDC と BP2 の USB HID を同じ Windows PC に接続すると、専用ハーネスで
