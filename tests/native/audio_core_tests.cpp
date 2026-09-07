@@ -192,6 +192,9 @@ static int test_receive_pipeline()
   CHECK(encode_audio_frame(frame, bytes.data(), bytes.size()));
   CHECK(pipeline.process_frame(bytes.data(), bytes.size(), 100U));
   CHECK(pipeline.diagnostics().accepted_control_frames == 1U);
+  // The watchdog starts after the first PCM frame, not at SESSION_START;
+  // delayed host-side USB startup must not invalidate a new session.
+  CHECK(pipeline.source_timeout(110U) == false);
   frame.flags = kFlagValid;
   frame.sequence = 11U;
   frame.sample_count = kSamplesPerUsbFrame;
@@ -248,6 +251,24 @@ static int test_receive_pipeline()
   CHECK(pipeline.diagnostics().hid_drop[0] == 1U);
   CHECK(pipeline.diagnostics().hid_drop[2] == 1U);
   CHECK(pipeline.diagnostics().reset_reason == ResetReason::kIwdg);
+
+  // A receiver reboot must recover an already-running source after the SYNC
+  // barrier, even when the source's alt=1 state means no new SESSION_START is
+  // emitted.  A new session counter is accepted; the last ended counter is
+  // still rejected by the stale-session guard above.
+  AudioReceivePipeline recovered;
+  CHECK(recovered.accept_sync(sync) == SyncResult::kAcceptedNew);
+  recovered.set_capture_alt(1U);
+  AudioFrame recovery_frame{};
+  recovery_frame.flags = kFlagValid;
+  recovery_frame.sequence = 1U;
+  recovery_frame.boot_nonce = sync.boot_nonce;
+  recovery_frame.session_counter = 4U;
+  recovery_frame.sample_count = kSamplesPerUsbFrame;
+  CHECK(encode_audio_frame(recovery_frame, bytes.data(), bytes.size()));
+  CHECK(recovered.process_frame(bytes.data(), bytes.size(), 200U));
+  CHECK(recovered.diagnostics().source_session_starts == 1U);
+  CHECK(recovered.diagnostics().accepted_pcm_frames == 1U);
   return 0;
 }
 

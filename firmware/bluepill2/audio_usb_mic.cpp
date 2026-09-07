@@ -59,5 +59,10 @@ extern "C" void bp2_audio_mic_fill_packet(uint8_t* output, uint16_t length)
     output[2U * i] = static_cast<uint8_t>(sample & 0xFFU);
     output[2U * i + 1U] = static_cast<uint8_t>(sample >> 8U);
   }
-  simple_kvm::audio::bp2::audio_receive_pipeline().note_usb_mic_packet(length);
+}
+
+extern "C" void bp2_audio_mic_note_packet(void)
+{
+  simple_kvm::audio::bp2::audio_receive_pipeline().note_usb_mic_packet(
+      simple_kvm::audio::kUsbPacketBytes);
 }

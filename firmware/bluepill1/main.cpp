@@ -34,6 +34,7 @@ static Packet       g_uart_pkt;
 static simple_kvm::audio::BootHidQueue g_boot_queue;
 static simple_kvm::audio::SyncRetryState g_sync;
 static uint8_t g_last_audio_alt = 0U;
+static uint32_t g_last_sync_heartbeat_ms = 0U;
 #endif
 
 // Heartbeat LED
@@ -121,17 +122,89 @@ static void send_sync(uint32_t now)
     g_sync.mark_sent(now);
 }
 
+// Keep a running receiver recoverable when BP2 reboots while the host stream
+// remains in alt=1.  This heartbeat is deliberately not part of the initial
+// retry counter/barrier: duplicate SYNC is idempotent and must not perturb the
+// 60-ms boot queue contract or make diagnostics look like a retry failure.
+static void send_sync_heartbeat()
+{
+    Packet sync{};
+    sync.type = PKT_AUDIO_CONTROL_SYNC;
+    sync.len = 8U;
+    write_u32(&sync.payload[0], g_sync.tuple().boot_nonce);
+    write_u32(&sync.payload[4], g_sync.tuple().request_id);
+    forward_packet(&sync);
+}
+
+// GET_STATUS page 0 is kept compatible with the original three-counter
+// response.  Additional pages expose the cumulative fields needed to
+// correlate a BP1 source-side loss with BP2 transport diagnostics.
+static bool bp1_status_values(uint8_t page, uint32_t *a, uint32_t *b,
+                              uint32_t *c)
+{
+    if (a == nullptr || b == nullptr || c == nullptr) return false;
+    const auto &diag =
+        simple_kvm::audio::bp1::audio_spi_master_diagnostics();
+    switch (page) {
+        case 0U:  // legacy: USB packets, SPI PCM frames, deadline misses
+            *a = diag.usb_audio_packets;
+            *b = diag.spi_pcm_frames;
+            *c = diag.spi_deadline_miss;
+            return true;
+        case 1U:  // source/transport loss
+            *a = diag.usb_audio_overwrite;
+            *b = diag.spi_dma_busy;
+            *c = diag.spi_status_crc_error;
+            return true;
+        case 2U:  // USB input validation/state
+            *a = diag.usb_audio_short;
+            *b = diag.usb_audio_bad_size;
+            *c = diag.usb_audio_alt_transitions;
+            return true;
+        case 3U:  // source session/control transitions
+            *a = diag.audio_source_session_starts;
+            *b = diag.audio_source_session_ends;
+            *c = diag.audio_control_sync_failures;
+            return true;
+        case 4U:  // sync retry/ack accounting
+            *a = diag.audio_control_sync_requests;
+            *b = diag.audio_control_sync_retries;
+            *c = diag.audio_control_sync_acks;
+            return true;
+        case 5U:  // transport frame accounting
+            *a = diag.spi_pcm_frames;
+            *b = diag.spi_control_frames;
+            *c = diag.usb_audio_packets;
+            return true;
+        case 6U:  // host/UART activity
+            *a = diag.cdc_rx;
+            *b = diag.cdc_tx;
+            *c = diag.uart_tx;
+            return true;
+        case 7U:  // boot HID queue and missing input
+            *a = diag.hid_boot_queue_high_water;
+            *b = diag.hid_boot_queue_overflow;
+            *c = diag.usb_audio_missing_ms;
+            return true;
+        default:
+            return false;
+    }
+}
+
 static void send_bp1_status(uint8_t page)
 {
-    const auto &diag = simple_kvm::audio::bp1::audio_spi_master_diagnostics();
+    uint32_t a = 0U;
+    uint32_t b = 0U;
+    uint32_t c = 0U;
+    if (!bp1_status_values(page, &a, &b, &c)) return;
     Packet response{};
     response.type = PKT_AUDIO_RESPONSE;
     response.len = 14U;
     response.payload[0] = 1U;
     response.payload[1] = page;
-    write_u32(&response.payload[2], diag.usb_audio_packets);
-    write_u32(&response.payload[6], diag.spi_pcm_frames);
-    write_u32(&response.payload[10], diag.spi_deadline_miss);
+    write_u32(&response.payload[2], a);
+    write_u32(&response.payload[6], b);
+    write_u32(&response.payload[10], c);
     uint8_t frame[20];
     const uint8_t length = packet_encode(&response, frame, sizeof(frame));
     if (length > 0U) Serial.write(frame, length);
@@ -216,6 +289,14 @@ static void service_audio_control(uint32_t now)
 {
     if (g_sync.should_send(now)) send_sync(now);
 
+    const uint8_t alt = simple_kvm::audio::bp1::usb_audio_alt();
+    if (alt == 1U && g_sync.acked() &&
+        (g_last_sync_heartbeat_ms == 0U ||
+         static_cast<uint32_t>(now - g_last_sync_heartbeat_ms) >= 1000U)) {
+        send_sync_heartbeat();
+        g_last_sync_heartbeat_ms = now;
+    }
+
     if (!g_sync.barrier_active(now) && g_boot_queue.fill() > 0U) {
         uint8_t frame[20];
         uint8_t length = 0U;
@@ -242,7 +323,6 @@ static void service_audio_control(uint32_t now)
         }
     }
 
-    const uint8_t alt = simple_kvm::audio::bp1::usb_audio_alt();
     if (g_last_audio_alt == 1U && alt == 0U) {
         Packet end{};
         end.type = PKT_AUDIO_SESSION_END;

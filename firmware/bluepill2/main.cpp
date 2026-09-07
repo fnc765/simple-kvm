@@ -72,18 +72,106 @@ static void send_uart_packet(const Packet *packet)
     if (length > 0U) Serial1.write(frame, length);
 }
 
-static void send_bp2_status(uint8_t page)
+// GET_STATUS responses keep the original 14-byte page-0 layout for existing
+// host tools.  The additional pages expose the individual cumulative fields
+// needed to localize a nominal-run failure without sending unsolicited UART
+// traffic.  Each page is [device, page, a:u32, b:u32, c:u32].
+static bool bp2_status_values(uint8_t page, uint32_t *a, uint32_t *b,
+                              uint32_t *c)
 {
+    if (a == nullptr || b == nullptr || c == nullptr) return false;
     const auto &diag =
         simple_kvm::audio::bp2::audio_receive_pipeline().diagnostics();
+    switch (page) {
+        case 0U:  // legacy: accepted PCM, SPI CRC, underflow + overflow
+            *a = diag.accepted_pcm_frames;
+            *b = diag.spi_crc_error;
+            *c = diag.underflow + diag.overflow;
+            return true;
+        case 1U:  // receive/accept accounting
+            *a = diag.spi_rx_frames;
+            *b = diag.accepted_pcm_frames;
+            *c = diag.accepted_control_frames;
+            return true;
+        case 2U:  // transport loss
+            *a = diag.spi_sequence_gap;
+            *b = diag.spi_overrun;
+            *c = diag.spi_short_transfer;
+            return true;
+        case 3U:  // frame validation
+            *a = diag.spi_magic_error;
+            *b = diag.spi_version_error;
+            *c = diag.spi_crc_error;
+            return true;
+        case 4U:  // duplicate and audio continuity
+            *a = diag.spi_duplicate;
+            *b = diag.underflow;
+            *c = diag.overflow;
+            return true;
+        case 5U:  // ASRC state (signed values are sent as raw two's-complement)
+            *a = diag.prefill_count;
+            *b = diag.asrc_clamp_count;
+            *c = static_cast<uint32_t>(diag.asrc_step_ppm);
+            return true;
+        case 6U:  // ring state
+            *a = diag.ring_fill;
+            *b = diag.ring_min;
+            *c = diag.ring_max;
+            return true;
+        case 7U:  // source/session transitions
+            *a = diag.source_session_starts;
+            *b = diag.source_session_ends;
+            *c = diag.source_session_clears;
+            return true;
+        case 8U:  // source/control recovery
+            *a = diag.source_timeouts;
+            *b = diag.stale_session_controls;
+            *c = diag.control_sync_accepts;
+            return true;
+        case 9U:  // capture state transitions
+            *a = diag.capture_alt_transitions;
+            *b = diag.capture_session_starts;
+            *c = diag.capture_session_clears;
+            return true;
+        case 10U:  // USB microphone traffic/state
+            *a = diag.usb_mic_packets;
+            *b = diag.usb_mic_bytes;
+            *c = diag.usb_mic_reset;
+            return true;
+        case 11U:  // USB suspend/resume and closed-capture discards
+            *a = diag.usb_mic_suspend;
+            *b = diag.usb_mic_resume;
+            *c = diag.discarded_capture_closed;
+            return true;
+        case 12U:  // HID busy counters
+            *a = diag.hid_send_busy[0];
+            *b = diag.hid_send_busy[1];
+            *c = diag.hid_send_busy[2];
+            return true;
+        case 13U:  // HID drop counters
+            *a = diag.hid_drop[0];
+            *b = diag.hid_drop[1];
+            *c = diag.hid_drop[2];
+            return true;
+        default:
+            return false;
+    }
+}
+
+static void send_bp2_status(uint8_t page)
+{
+    uint32_t a = 0U;
+    uint32_t b = 0U;
+    uint32_t c = 0U;
+    if (!bp2_status_values(page, &a, &b, &c)) return;
     Packet response{};
     response.type = PKT_AUDIO_RESPONSE;
     response.len = 14U;
     response.payload[0] = 2U;
     response.payload[1] = page;
-    write_u32(&response.payload[2], diag.accepted_pcm_frames);
-    write_u32(&response.payload[6], diag.spi_crc_error);
-    write_u32(&response.payload[10], diag.underflow + diag.overflow);
+    write_u32(&response.payload[2], a);
+    write_u32(&response.payload[6], b);
+    write_u32(&response.payload[10], c);
     send_uart_packet(&response);
 }
 
@@ -174,6 +262,60 @@ static bool handle_audio_control(const Packet *packet)
 // Absolute reports arrive over 115200-baud UART much faster than the USB
 // interrupt endpoint can complete them.  Keep button edges FIFO ordered,
 // while replacing redundant same-button motion at the queue tail.
+#ifdef SIMPLE_KVM_AUDIO
+#define HID_REPORT_QUEUE_CAPACITY 32u
+#define HID_REPORT_MAX_BYTES 8u
+
+struct HidReportQueue {
+    uint8_t reports[HID_REPORT_QUEUE_CAPACITY][HID_REPORT_MAX_BYTES];
+    uint8_t head;
+    uint8_t count;
+};
+
+static HidReportQueue g_keyboard_queue{};
+static HidReportQueue g_mouse_queue{};
+
+static uint8_t hid_queue_index(const HidReportQueue *queue, uint8_t offset)
+{
+    return static_cast<uint8_t>(
+        (static_cast<uint16_t>(queue->head) + offset) %
+        HID_REPORT_QUEUE_CAPACITY
+    );
+}
+
+static void hid_queue_clear(HidReportQueue *queue)
+{
+    queue->head = 0U;
+    queue->count = 0U;
+}
+
+static bool hid_queue_push(HidReportQueue *queue, const uint8_t *report,
+                           uint8_t length, bool coalesce_same_buttons)
+{
+    if (report == nullptr || length > HID_REPORT_MAX_BYTES) return false;
+    if (queue->count > 0U && coalesce_same_buttons) {
+        const uint8_t tail = hid_queue_index(
+            queue, static_cast<uint8_t>(queue->count - 1U));
+        if (queue->reports[tail][0] == report[0]) {
+            memcpy(queue->reports[tail], report, length);
+            return true;
+        }
+    }
+    if (queue->count >= HID_REPORT_QUEUE_CAPACITY) return false;
+    const uint8_t slot = hid_queue_index(queue, queue->count);
+    memcpy(queue->reports[slot], report, length);
+    queue->count++;
+    return true;
+}
+
+static void hid_queue_pop(HidReportQueue *queue)
+{
+    if (queue->count == 0U) return;
+    queue->head = hid_queue_index(queue, 1U);
+    queue->count--;
+}
+#endif
+
 #define ABS_MOUSE_QUEUE_CAPACITY 32u
 #define ABS_INPUT_TIMEOUT_MS 2500u
 static uint8_t g_abs_queue[ABS_MOUSE_QUEUE_CAPACITY][PKT_LEN_MOUSE_ABS];
@@ -267,6 +409,57 @@ static void abs_mouse_service(void)
     }
 }
 
+#ifdef SIMPLE_KVM_AUDIO
+static void hid_keyboard_service(void)
+{
+    if (hUSBD_Device_HID.dev_state != USBD_STATE_CONFIGURED) {
+        hid_queue_clear(&g_keyboard_queue);
+        return;
+    }
+    if (g_keyboard_queue.count == 0U ||
+        !HID_Composite_keyboard_isIdle()) {
+        return;
+    }
+    const uint8_t status = USBD_HID_KEYBOARD_SendReport(
+        &hUSBD_Device_HID,
+        g_keyboard_queue.reports[g_keyboard_queue.head],
+        PKT_LEN_KEYBOARD
+    );
+    simple_kvm::audio::bp2::audio_receive_pipeline().note_hid_result(
+        0U, status == USBD_BUSY, status != USBD_OK);
+    if (status == USBD_OK) {
+        hid_queue_pop(&g_keyboard_queue);
+    }
+}
+
+static void hid_mouse_service(void)
+{
+    if (hUSBD_Device_HID.dev_state != USBD_STATE_CONFIGURED) {
+        hid_queue_clear(&g_mouse_queue);
+        return;
+    }
+    if (g_mouse_queue.count == 0U || !HID_Composite_mouse_isIdle()) {
+        return;
+    }
+    const uint8_t status = USBD_HID_MOUSE_SendReport(
+        &hUSBD_Device_HID,
+        g_mouse_queue.reports[g_mouse_queue.head],
+        PKT_LEN_MOUSE
+    );
+    simple_kvm::audio::bp2::audio_receive_pipeline().note_hid_result(
+        1U, status == USBD_BUSY, status != USBD_OK);
+    if (status == USBD_OK) {
+        hid_queue_pop(&g_mouse_queue);
+    }
+}
+
+static void hid_queued_service(void)
+{
+    hid_keyboard_service();
+    hid_mouse_service();
+}
+#endif
+
 static void hid_send_keyboard(const Packet *p)
 {
     if (p->len != PKT_LEN_KEYBOARD) return;
@@ -274,10 +467,11 @@ static void hid_send_keyboard(const Packet *p)
     uint8_t report[PKT_LEN_KEYBOARD];
     memcpy(report, p->payload, PKT_LEN_KEYBOARD);
 #ifdef SIMPLE_KVM_AUDIO
-    const uint8_t result = USBD_HID_KEYBOARD_SendReport(
-        &hUSBD_Device_HID, report, PKT_LEN_KEYBOARD);
-    simple_kvm::audio::bp2::audio_receive_pipeline().note_hid_result(
-        0U, result == USBD_BUSY, result != USBD_OK);
+    if (!hid_queue_push(&g_keyboard_queue, report, PKT_LEN_KEYBOARD, false)) {
+        g_err_count = 6;
+        simple_kvm::audio::bp2::audio_receive_pipeline().note_hid_result(
+            0U, false, true);
+    }
 #else
     HID_Composite_keyboard_sendReport(report, PKT_LEN_KEYBOARD);
 #endif
@@ -296,10 +490,11 @@ static void hid_send_mouse(const Packet *p)
     report[3] = static_cast<uint8_t>(rpt.wheel_v);
     report[4] = static_cast<uint8_t>(rpt.wheel_h);
 #ifdef SIMPLE_KVM_AUDIO
-    const uint8_t result = USBD_HID_MOUSE_SendReport(
-        &hUSBD_Device_HID, report, sizeof(report));
-    simple_kvm::audio::bp2::audio_receive_pipeline().note_hid_result(
-        1U, result == USBD_BUSY, result != USBD_OK);
+    if (!hid_queue_push(&g_mouse_queue, report, sizeof(report), true)) {
+        g_err_count = 6;
+        simple_kvm::audio::bp2::audio_receive_pipeline().note_hid_result(
+            1U, false, true);
+    }
 #else
     HID_Composite_mouse_sendReport(report, sizeof(report));
 #endif
@@ -320,6 +515,10 @@ void setup()
     digitalWrite(LED_PIN, HIGH);
     Serial1.begin(115200UL);
     parser_init(&g_parser);
+#ifdef SIMPLE_KVM_AUDIO
+    hid_queue_clear(&g_keyboard_queue);
+    hid_queue_clear(&g_mouse_queue);
+#endif
 
     IWatchdog.begin(4000000);
     HID_Composite_Init(HID_KEYBOARD);
@@ -366,6 +565,9 @@ void loop()
                 default: g_err_count = 6; break;
             }
             abs_mouse_service();
+#ifdef SIMPLE_KVM_AUDIO
+            hid_queued_service();
+#endif
         }
     }
 #ifdef SIMPLE_KVM_AUDIO
@@ -375,6 +577,7 @@ void loop()
         static_cast<uint8_t>(USBD_STATE_DEFAULT),
         static_cast<uint8_t>(USBD_STATE_SUSPENDED));
     simple_kvm::audio::bp2::audio_spi_slave_poll(millis());
+    bp2_audio_mic_service();
 #endif
 
     // Heartbeats arrive once per second while the app is healthy.  If UART
@@ -392,4 +595,7 @@ void loop()
         g_last_uart_activity_ms = millis();
     }
     abs_mouse_service();
+#ifdef SIMPLE_KVM_AUDIO
+    hid_queued_service();
+#endif
 }

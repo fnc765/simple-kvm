@@ -8,7 +8,8 @@ AudioReceivePipeline::AudioReceivePipeline()
     : source_session_{}, sequence_{}, ring_{}, asrc_{}, run_snapshots_{},
       diagnostics_{}, last_source_ms_(0U), asrc_clamp_accumulated_(0U),
       prefill_accumulated_(0U), last_usb_state_(0U),
-      have_source_time_(false), have_usb_state_(false)
+      have_source_time_(false), have_source_pcm_(false),
+      have_usb_state_(false)
 {
   diagnostics_.ring_min = kRingCapacity;
 }
@@ -23,6 +24,7 @@ void AudioReceivePipeline::clear_stream(bool source_clear)
   diagnostics_.ring_fill = 0U;
   if (source_clear) {
     ++diagnostics_.source_session_clears;
+    have_source_pcm_ = false;
   }
 }
 
@@ -119,8 +121,22 @@ bool AudioReceivePipeline::process_frame(const uint8_t* data, size_t length,
 
   const bool source_changed = !source_session_.matches(
       frame.boot_nonce, frame.session_counter);
+  const bool valid_pcm =
+      (frame.flags & kFlagValid) != 0U &&
+      frame.sample_count == kSamplesPerUsbFrame;
   if (source_changed) {
-    if ((frame.flags & kFlagSessionStart) == 0U ||
+    // A receiver can reboot while the source remains in alt=1.  In that case
+    // the source has no reason to emit another SESSION_START, but the first
+    // PCM frame after the already accepted SYNC still carries the authenticated
+    // boot nonce and a new session counter.  Re-arm that session only while
+    // the receiver is idle and the counter differs from the last ended one;
+    // stale PCM from an ended session remains fail-closed.
+    const bool recover_pcm_session =
+        valid_pcm && source_session_.synced() && !source_session_.active() &&
+        frame.boot_nonce == source_session_.boot_nonce() &&
+        frame.session_counter != source_session_.session_counter();
+    if ((!recover_pcm_session &&
+         (frame.flags & kFlagSessionStart) == 0U) ||
         !source_session_.start_source(frame.boot_nonce,
                                       frame.session_counter)) {
       ++diagnostics_.stale_session_controls;
@@ -140,8 +156,13 @@ bool AudioReceivePipeline::process_frame(const uint8_t* data, size_t length,
   if (sequence_result == SequenceResult::kGap) {
     ++diagnostics_.spi_sequence_gap;
   }
-  last_source_ms_ = now_ms;
-  have_source_time_ = true;
+  if (valid_pcm) {
+    have_source_pcm_ = true;
+  }
+  if (have_source_pcm_) {
+    last_source_ms_ = now_ms;
+    have_source_time_ = true;
+  }
 
   if ((frame.flags & kFlagSessionStart) != 0U &&
       frame.sample_count == 0U) {

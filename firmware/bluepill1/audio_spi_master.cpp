@@ -34,6 +34,11 @@ void end_transaction()
     --wait;
   }
   digitalWrite(PA4, HIGH);
+  // Keep NSS deasserted for a short, deterministic guard interval.  The
+  // slave rearms both DMA channels from its transfer-complete ISR; starting
+  // the next frame immediately after the GPIO write can otherwise race that
+  // rearm on STM32F1 and produce an avoidable first-byte loss.
+  delayMicroseconds(4U);
   if (wait == 0U || g_dma_error) {
     ++g_diagnostics.spi_deadline_miss;
     (void)HAL_SPI_Abort(&g_spi);
@@ -170,9 +175,11 @@ bool audio_spi_master_begin()
     return false;
   }
 
-  HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 2U, 0U);
+  // Keep the SPI DMA completion ahead of the USB IRQ so NSS is released and
+  // the next frame can be scheduled without stretching the queue deadline.
+  HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 0U, 0U);
   HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
-  HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 2U, 0U);
+  HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 0U, 0U);
   HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
   memset(g_rx_frame, 0, sizeof(g_rx_frame));
   return true;
