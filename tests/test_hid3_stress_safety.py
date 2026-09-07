@@ -104,3 +104,4 @@ def test_audio_probe_ignores_short_startup_glitches_for_alignment():
     assert "search_limit = min(len(captured), 131072)" in probe
     assert "sustained = starts" in probe
     assert "max(64, min(len(reference) // 4, 128))" in probe
+    assert "first - 512" in probe

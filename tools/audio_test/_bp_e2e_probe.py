@@ -570,7 +570,9 @@ def find_offset(captured, reference):
         if len(activity) == 0:
             return None, 0.0, 1.0, 0.0
         first = int(activity[0])
-    offsets = range(max(0, first - 16), min(len(captured), first + 17))
+    # The first sustained run can begin after an ASRC startup ramp; include
+    # the preceding half-millisecond so the true preamble edge is searchable.
+    offsets = range(max(0, first - 512), min(len(captured), first + 17))
     # The ASRC nominal clamp is +/-2000 ppm.  A wider search also covers the
     # startup controller transient before the ring has converged.
     coarse_steps = np.linspace(0.996, 1.004, 33)
