@@ -126,11 +126,44 @@ VID/PID/Product string (`046D:C52B` / `Logitech` / `USB Receiver`) は Logitech 
 
 ---
 
+### 3.5.1. BP2 audio profileのUSB identity
+
+legacy profileとaudio profileは、同じLogitech系VIDを維持しつつPIDを分けます。
+
+| profile | VID:PID | Manufacturer / Product | 用途 |
+|---------|---------|------------------------|------|
+| `bluepill2_legacy` | `046D:C52B` | `Logitech` / `USB Receiver` | HID keyboard + relative mouse + absolute mouse |
+| `bluepill2_audio` | `046D:C52C` | `Logitech` / `USB Receiver` | 上記3 HID + UAC1 mono microphone |
+
+`046D:C52C` はリポジトリ内の検証用PIDであり、外部配布用のVID/PIDとして扱いません。
+PID変更だけでlegacyの`C52B`とは別のWindows hardware IDになるため、audio profileの
+`bcdDevice`は現行値から変更しません。audio用の検出はPIDに加えて、product string、
+`MI_00`〜`MI_03`、対象interfaceを確認し、別のLogitech機器を対象にしないfail-closed
+preflightを使用します。
+
+古い`C52B`の非表示デバイスが残っている場合は、まず対象を限定して一覧を確認します。
+
+```powershell
+Get-PnpDevice -PresentOnly | Where-Object {
+  $_.InstanceId -match 'VID_046D&PID_C52B'
+} | Select-Object Status,Class,FriendlyName,InstanceId
+```
+
+デバイス マネージャーで、一覧に出た`USB\VID_046D&PID_C52B...`の該当デバイスだけを
+「デバイスのアンインストール」してから再接続してください。ドライバーパッケージは
+削除せず、全USBデバイスやUSBクラス全体を削除する手順は実施しません。再接続後は
+audio profileが`046D:C52C`、legacy profileが`046D:C52B`であることを確認します。
+
+---
+
 ## 3.6. 同一 PC での無人ハードウェアループバック検証
 
 BP1 の USB CDC と BP2 の USB HID を同じ Windows PC に接続すると、専用ハーネスで
 `PC -> BP1 CDC -> UART -> BP2 -> USB HID -> PC Raw Input` を人手なしで検証できます。
 通常の Simple KVM アプリは終了し、BP1–BP2 間の UART と GND を接続した状態で実行します。
+
+このハーネスはlegacy profileの検証用で、BP2を`046D:C52B`として識別します。audio
+profileのHID同時試験は`046D:C52C`専用ハーネスを使用してください。
 
 ```powershell
 python tools/hardware_loopback.py

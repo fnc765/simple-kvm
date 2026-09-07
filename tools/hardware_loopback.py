@@ -48,6 +48,7 @@ from app.core.hardware_loopback import (  # noqa: E402
 )
 from app.core.protocol import HID_ABS_MAX, build_mouse_abs_report  # noqa: E402
 from app.core.serial_comm import SerialComm  # noqa: E402
+from tools.hid_desktop import attach_to_input_desktop  # noqa: E402
 
 
 BP1_VID = 0x0483
@@ -62,10 +63,13 @@ RIDI_DEVICENAME = 0x20000007
 RIM_TYPEMOUSE = 0
 RIDEV_INPUTSINK = 0x00000100
 RIDEV_DEVNOTIFY = 0x00002000
+RIDEV_REMOVE = 0x00000001
 SM_CXSCREEN = 0
 SM_CYSCREEN = 1
 VK_LBUTTON = 0x01
 UINT_ERROR = 0xFFFFFFFF
+SW_SHOW = 5
+ASFW_ANY = ctypes.c_ulong(-1).value
 
 
 class POINT(ctypes.Structure):
@@ -173,6 +177,27 @@ def _configure_win32() -> None:
     user32.GetSystemMetrics.restype = ctypes.c_int
     user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
     user32.GetAsyncKeyState.restype = ctypes.c_short
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.ShowWindow.restype = wintypes.BOOL
+    user32.BringWindowToTop.argtypes = [wintypes.HWND]
+    user32.BringWindowToTop.restype = wintypes.BOOL
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.SetForegroundWindow.restype = wintypes.BOOL
+    user32.SetActiveWindow.argtypes = [wintypes.HWND]
+    user32.SetActiveWindow.restype = wintypes.HWND
+    user32.AllowSetForegroundWindow.argtypes = [wintypes.DWORD]
+    user32.AllowSetForegroundWindow.restype = wintypes.BOOL
+    user32.GetWindowThreadProcessId.argtypes = [
+        wintypes.HWND,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.AttachThreadInput.argtypes = [
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.BOOL,
+    ]
+    user32.AttachThreadInput.restype = wintypes.BOOL
 
 
 def _device_name(handle: wintypes.HANDLE) -> str:
@@ -241,6 +266,9 @@ class RawMouseMonitor(QWidget):
         super().__init__()
         self.events: list[ObservedMouseEvent] = []
         self._device_names: dict[int, str] = {}
+        self._surface_ready = False
+        self._surface_hwnd = 0
+        self._safety_failure: str | None = None
         self.setWindowTitle("Simple KVM hardware loopback verification")
         self.setStyleSheet("background-color: #20242b;")
         self.setWindowFlags(
@@ -252,9 +280,22 @@ class RawMouseMonitor(QWidget):
         """Show the safe surface and register for background mouse reports."""
 
         self.showFullScreen()
+        screens = QApplication.screens()
+        if len(screens) > 1:
+            # Full-screen mode targets one monitor. Use one opaque, topmost
+            # frameless window spanning the virtual desktop so absolute or
+            # relative reports cannot land on an uncovered monitor.
+            left = min(screen.geometry().left() for screen in screens)
+            top = min(screen.geometry().top() for screen in screens)
+            right = max(screen.geometry().right() for screen in screens)
+            bottom = max(screen.geometry().bottom() for screen in screens)
+            self.showNormal()
+            self.setGeometry(left, top, right - left + 1, bottom - top + 1)
+            self.show()
         self.raise_()
         self.activateWindow()
         QApplication.processEvents()
+        self.require_safe_surface()
         registration = RAWINPUTDEVICE(
             0x01,
             0x02,
@@ -266,6 +307,129 @@ class RawMouseMonitor(QWidget):
             ctypes.byref(registration), 1, ctypes.sizeof(RAWINPUTDEVICE)
         ):
             raise ctypes.WinError(ctypes.get_last_error())
+
+    @property
+    def safety_failure(self) -> str | None:
+        return self._safety_failure
+
+    def _foreground_window(self) -> int:
+        assert user32 is not None
+        user32.GetForegroundWindow.argtypes = []
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        return int(user32.GetForegroundWindow() or 0)
+
+    def _activate_surface(self) -> None:
+        """Best-effort foreground activation before the safety gate."""
+
+        assert user32 is not None
+        hwnd = wintypes.HWND(self._surface_hwnd)
+        user32.ShowWindow(hwnd, SW_SHOW)
+        user32.BringWindowToTop(hwnd)
+        user32.AllowSetForegroundWindow(ASFW_ANY)
+        foreground = self._foreground_window()
+        if foreground and foreground != self._surface_hwnd:
+            foreground_thread = wintypes.DWORD(0)
+            user32.GetWindowThreadProcessId(
+                wintypes.HWND(foreground), ctypes.byref(foreground_thread)
+            )
+            current_thread = ctypes.windll.kernel32.GetCurrentThreadId()
+            attached = bool(
+                foreground_thread.value
+                and foreground_thread.value != current_thread
+                and user32.AttachThreadInput(
+                    current_thread, foreground_thread.value, True
+                )
+            )
+            try:
+                user32.SetForegroundWindow(hwnd)
+                user32.SetActiveWindow(hwnd)
+            finally:
+                if attached:
+                    user32.AttachThreadInput(
+                        current_thread, foreground_thread.value, False
+                    )
+        else:
+            user32.SetForegroundWindow(hwnd)
+            user32.SetActiveWindow(hwnd)
+
+    def _covers_all_screens(self) -> bool:
+        geometry = self.geometry()
+        screens = QApplication.screens()
+        return bool(screens) and all(
+            geometry.x() <= screen.geometry().x()
+            and geometry.y() <= screen.geometry().y()
+            and geometry.right() >= screen.geometry().right()
+            and geometry.bottom() >= screen.geometry().bottom()
+            for screen in screens
+        )
+
+    def require_safe_surface(self, timeout_s: float = 2.0) -> None:
+        """Fail closed unless the input shield is visible and foreground."""
+        self._surface_hwnd = int(self.winId())
+        self._activate_surface()
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            QApplication.processEvents()
+            if (
+                self.isVisible()
+                and not self.isMinimized()
+                and self.isActiveWindow()
+                and self._covers_all_screens()
+                and self._foreground_window() == self._surface_hwnd
+            ):
+                self._surface_ready = True
+                self._safety_failure = None
+                return
+            self._activate_surface()
+            time.sleep(0.01)
+        self._surface_ready = False
+        self._safety_failure = (
+            "input shield was not visible, foreground, and full-screen "
+            f"(hwnd={self._surface_hwnd}, foreground="
+            f"{self._foreground_window()})"
+        )
+        self.close()
+        raise RuntimeError(self._safety_failure)
+
+    def safety_ok(self) -> bool:
+        if not self._surface_ready:
+            return False
+        QApplication.processEvents()
+        if not self.isVisible() or self.isMinimized() or not self.isActiveWindow():
+            self._surface_ready = False
+            self._safety_failure = "input shield lost visibility or activation"
+            return False
+        if self._foreground_window() != self._surface_hwnd:
+            self._surface_ready = False
+            self._safety_failure = "input shield lost foreground ownership"
+            return False
+        return True
+
+    def foreground_safe(self) -> bool:
+        """Thread-safe foreground check used immediately before injection.
+
+        Unlike :meth:`safety_ok`, this method does not touch Qt state and may
+        therefore be called by a serial injector worker.
+        """
+        if not self._surface_ready or not self._surface_hwnd or user32 is None:
+            return False
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        return bool(
+            user32.IsWindowVisible(wintypes.HWND(self._surface_hwnd))
+            and self._foreground_window() == self._surface_hwnd
+        )
+
+    def closeEvent(self, event):  # noqa: N802, ANN001
+        if user32 is not None:
+            registration = RAWINPUTDEVICE(
+                0x01, 0x02, RIDEV_REMOVE, wintypes.HWND(0)
+            )
+            user32.RegisterRawInputDevices(
+                ctypes.byref(registration), 1, ctypes.sizeof(registration)
+            )
+        self._surface_ready = False
+        super().closeEvent(event)
 
     def nativeEvent(self, event_type, message):  # noqa: N802, ANN001, ANN201
         """Capture WM_INPUT for the exact originating mouse device."""
@@ -424,7 +588,14 @@ def main() -> int:
         assert user32 is not None
         screen_width = user32.GetSystemMetrics(SM_CXSCREEN)
         screen_height = user32.GetSystemMetrics(SM_CYSCREEN)
-        original_cursor = get_cursor_position()
+        try:
+            original_cursor = get_cursor_position()
+        except OSError as exc:
+            evidence["safety_failure"] = f"cursor position unavailable: {exc}"
+            print(f"LOOPBACK_E2E_SAFETY_FAIL: {exc}", flush=True)
+            raise VerificationFailure(
+                "cannot guarantee cursor restoration in this desktop/session"
+            ) from exc
         evidence["primary_screen"] = {"width": screen_width, "height": screen_height}
         evidence["original_cursor"] = {
             "x": original_cursor.x,

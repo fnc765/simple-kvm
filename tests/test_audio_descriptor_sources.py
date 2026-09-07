@@ -182,3 +182,32 @@ def test_audio_profiles_raise_usb_core_interface_limit():
 
     assert "-D USBD_MAX_NUM_INTERFACES=4" in section("bluepill1_audio")
     assert "-D USBD_MAX_NUM_INTERFACES=5" in section("bluepill2_audio")
+
+
+def test_audio_and_legacy_usb_identity_variants_are_explicit():
+    text = (ROOT / "platformio.ini").read_text(encoding="utf-8")
+
+    def section(name: str) -> str:
+        match = re.search(
+            rf"^\[env:{re.escape(name)}\].*?(?=^\[env:|\Z)",
+            text,
+            re.DOTALL | re.MULTILINE,
+        )
+        assert match, name
+        return match.group(0)
+
+    legacy = section("bluepill2")
+    audio = section("bluepill2_audio")
+    bp1_audio = section("bluepill1_audio")
+    assert "-D USBD_VID=0x046D" in legacy
+    assert "-D USBD_PID=0xC52B" in legacy
+    assert '-D \'USB_MANUFACTURER_STRING="Logitech"\'' in legacy
+    assert '-D \'USB_PRODUCT_STRING="USB Receiver"\'' in legacy
+    assert "-D USBD_VID=0x046D" in audio
+    assert "-D USBD_PID=0xC52C" in audio
+    assert '-D \'USB_MANUFACTURER_STRING="Logitech"\'' in audio
+    assert '-D \'USB_PRODUCT_STRING="USB Receiver"\'' in audio
+    assert "0xA1D1" not in audio
+    assert "-D USBD_VID=0x0483" in bp1_audio
+    assert "-D USBD_PID=0xA1D0" in bp1_audio
+    assert "[env:bluepill2_legacy]\nextends = env:bluepill2" in text

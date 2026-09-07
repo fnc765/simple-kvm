@@ -7,7 +7,8 @@
   *   (a) bcdDevice: 2.00 → 24.00 (0x00,0x18)
   *   (a2) bcdDevice: 24.00 → 24.01 (0x01,0x18) for Phase 3 absolute mouse
   *   (b) bMaxPacketSize: USB_MAX_EP0_SIZE (must match the STM32 USB core)
-  *   (c) iSerial: 0x00 (no serial number string, matching Logitech C52B)
+  *   (c) iSerial: 0x00 (no serial number string, matching the legacy C52B
+  *       and internal audio C52C identity variants)
   *   (d) USBD_SerialStrDescriptor returns length 0 (iSerial=0 equivalent)
   *
   * Original source:

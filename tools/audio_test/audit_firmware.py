@@ -18,6 +18,8 @@ PROFILES = {
         "descriptor": "simple_kvm_bp1_audio_config_descriptor",
         "descriptor_size": 174,
         "interfaces": 4,
+        "vid": 0x0483,
+        "pid": 0xA1D0,
         "device": bytes((0xEF, 0x02, 0x01, 64)),
         "pma_used": 488,
         "ep_def": (
@@ -30,6 +32,8 @@ PROFILES = {
         "descriptor": "simple_kvm_bp2_audio_config_descriptor",
         "descriptor_size": 183,
         "interfaces": 5,
+        "vid": 0x046D,
+        "pid": 0xC52C,
         "device": bytes((0xEF, 0x02, 0x01, 64)),
         "pma_used": 384,
         "ep_def": (
@@ -132,6 +136,11 @@ def main() -> int:
     device = linked_bytes(symbol_table, "USBD_Class_DeviceDesc", data_blob,
                           data_vma, 18)
     assert device[4:8] == config["device"]
+    expected_identity = bytes((
+        config["vid"] & 0xFF, (config["vid"] >> 8) & 0xFF,
+        config["pid"] & 0xFF, (config["pid"] >> 8) & 0xFF,
+    ))
+    assert device[8:12] == expected_identity
 
     sections = section_sizes(size_tool, elf)
     flash = len(binary)
@@ -144,6 +153,7 @@ def main() -> int:
     print(
         "AUDIO_ELF_AUDIT_PASS "
         f"env={args.env} descriptor_bytes={len(descriptor)} "
+        f"vid={int(config['vid']):04X} pid={int(config['pid']):04X} "
         f"pma_used={config['pma_used']} flash={flash} "
         f"static_ram={static_ram} linker_reserved={linker_reserved} "
         f"static_headroom={static_headroom}"
