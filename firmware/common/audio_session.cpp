@@ -35,6 +35,7 @@ void SourceSessionState::reset()
   boot_nonce_ = 0U;
   session_counter_ = 0U;
   clear_count_ = 0U;
+  timed_out_ = false;
   last_end_valid_ = false;
   last_end_boot_nonce_ = 0U;
   last_end_session_counter_ = 0U;
@@ -47,6 +48,7 @@ SyncResult SourceSessionState::accept_sync(const SyncTuple& sync)
   }
   synced_ = true;
   active_ = false;
+  timed_out_ = false;
   sync_ = sync;
   boot_nonce_ = sync.boot_nonce;
   session_counter_ = 0U;
@@ -67,6 +69,7 @@ bool SourceSessionState::start_source(uint32_t boot_nonce,
     boot_nonce_ = boot_nonce;
     session_counter_ = session_counter;
     ++clear_count_;
+    timed_out_ = false;
     last_end_valid_ = false;
   }
   return true;
@@ -83,6 +86,7 @@ EndResult SourceSessionState::end_source_result(uint32_t boot_nonce,
 {
   if (matches(boot_nonce, session_counter)) {
     active_ = false;
+    timed_out_ = false;
     last_end_valid_ = true;
     last_end_boot_nonce_ = boot_nonce;
     last_end_session_counter_ = session_counter;
@@ -107,6 +111,7 @@ void SourceSessionState::timeout()
 {
   if (active_) {
     active_ = false;
+    timed_out_ = true;
     ++clear_count_;
   }
 }

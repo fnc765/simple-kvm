@@ -1,14 +1,15 @@
 # Audio probe オフライン修正・検証（2026-09-08）
 
-対象: `codex/usb-audio-bridge`、ベース `fe0b671`。
-この作業では USB/COM オープン、音声/HID送信、reset、flash、再列挙操作を実施していない。
-修正対象は PC 上の検証ツールとテストのみ。ファームウェアは変更していない。
+対象: `codex/usb-audio-bridge`、ホスト側修正のベース `fe0b671`、前回の実機検証時点 `754975f`。
+この追補では USB/COM オープン、音声/HID送信、reset、flash、再列挙操作を実施していない。
+前半は PC 上の検証ツールとテストの修正、追補では実機ログから特定した BP2 の session-timeout 復帰を
+`firmware/common` に修正した。修正後バイナリはまだ実機へ書き込んでいない。
 
 ## 結論と証拠の境界
 
 PC 側検証コードのバッファ範囲外アクセスを修正し、保存録音に見られる次周回PCM混入に対する送信ガードを追加した。
 ソフトウェア上の再現・回帰テスト、全構成ビルド、ELF監査は合格。
-ただし、実機の相関値改善、USBドライバの実際のカーソル挙動、60分のAudio/HID同時動作は未検証であり、実機復旧済みとは扱わない。
+ただし、session-timeout 修正後の実機相関値改善、USBドライバの実際のカーソル挙動、60分のAudio/HID同時動作は未検証であり、実機復旧済みとは扱わない。
 以前の「BP2のリセットが必要」という説明だけでは、以下のホスト側異常を説明できない。
 
 ## 保存録音から確認したこと
@@ -76,6 +77,19 @@ packetのframe数・状態flagの契約はMicrosoftの[IAudioCaptureClient::GetB
 - live probeは不合格時にexit code 1。`--help` / 不正な引数はデバイス開始前に終了する。
 - 保存波形専用markerは `AUDIO_OFFLINE_PASS/FAIL`。live/E2Eの合格markerとは分離する。
 
+### 長時間実機ログからの BP2 session-timeout 修正
+
+前回の `logs/hid3_continuous_60m_after_commit_20260908.log` は、試験プロセス自体は
+3,600 秒・172,800,000 capture frames まで走ったが、約169.2 秒以降の録音が無音になった。
+その時点の診断は、BP2 の `source_timeouts=10`、`stale_session_controls=3,431,778`、
+`spi_crc/gap/short/overrun=0` であり、CRC破損ではなく session state の復帰失敗と整合する。
+BP1 は alt=1 の同一 session を継続するため、受信タイムアウト後に新しい SESSION_START を送らない。
+
+`SourceSessionState` に timeout-only の復帰ラッチを追加し、同じ認証済み boot nonce/session counter の
+最初の PCM だけを再開として受け入れるようにした。明示的な SESSION_END、別 boot nonce、別 session counter
+にはこのラッチを適用せず、従来どおり stale fail-closed とする。ネイティブ回帰テストでは、同一 session の
+timeout→PCM復帰と、明示的 END 後の同一 session PCM拒否を別々に確認している。
+
 ## 実施した検証
 
 | 検証 | 結果 |
@@ -84,8 +98,8 @@ packetのframe数・状態flagの契約はMicrosoftの[IAudioCaptureClient::GetB
 | メモリcanary付き実コピー・録音読み出しテスト | PASS |
 | 正常ASRC波形、±1000 ppm追跡 | PASS |
 | 欠落・重複・次周回PCM・切断・NaN・無音途絶の検出 | PASS |
-| C++ native（`/W4 /WX`） | **AUDIO_UNIT_PASS tests=2837** |
-| 同C++テスト（MSVC AddressSanitizer付き） | **AUDIO_UNIT_PASS tests=2837**、検出エラーなし |
+| C++ native（`/W4 /WX`） | **AUDIO_UNIT_PASS tests=2848** |
+| 同C++テスト（MSVC AddressSanitizer付き） | **AUDIO_UNIT_PASS tests=2848**、検出エラーなし |
 | ASRCドリフト -1000/-500/-100/0/+100/+500/+1000 ppm | 各24時間相当の加速simulation PASS（実時間soakではない） |
 | BP1/BP2 × audio/legacy | **4構成ビルド成功**、ビルドログのwarning/errorなし |
 | BP1 audio ELF | 0483:A1D0、descriptor 174 byte、PMA 488/512 byte、PASS |
@@ -93,6 +107,19 @@ packetのframe数・状態flagの契約はMicrosoftの[IAudioCaptureClient::GetB
 | legacyのlinked device descriptor | BP1 0483:5740 / BP2 046D:C52B、PASS |
 | Python compileall、help、競合marker、git diff --check | PASS |
 | 元の失敗録音の再判定 | **期待どおりFAIL**、exit 1、p05は0.9831287462のまま |
+
+## 実機検証（修正前バイナリ）
+
+`754975f` のホスト側修正後バイナリで、reset/flashなしに次を実施した。
+
+| 試験 | 結果 |
+| --- | --- |
+| 10秒 exclusive audio | `AUDIO_SINGLE_HOST_PASS`、480,000 frames、PRBS p05 0.9999290839 |
+| 20秒 Audio+HID smoke | `AUDIO_HID_SIMULTANEOUS_PASS`、keyboard make/break balanced |
+| 60分 HID3 continuous | **FAIL**。約169.2秒以降無音、`continuous_unexpected_zero_run` |
+
+この60分結果は今回の timeout-recovery 修正を含まないため、修正後の実機合格証拠ではない。
+修正後 ELF はビルド・native 回帰・descriptor/PMA audit までで、flash および再実機試験は未実施である。
 
 ログは `logs/offline_*_20260908.log` に保存。
 詳細な保存波形照合は `logs/inspect_saved_audio.py` と `logs/offline_ring_diagnostic_20260908.log`。
@@ -119,5 +146,5 @@ python tools/audio_test/audit_firmware.py --env bluepill2_audio
 ```
 
 `pio run` にupload targetは指定しない。
-実機を再び使用できる時点で、修正後probeによる10秒baseline、短時間Audio/HID、連続試験を改めて行う必要がある。
+実機を再び使用できる時点で、修正後 binary による10秒baseline、短時間Audio/HID、連続試験を改めて行う必要がある。
 今回のオフライン合格を実機や独立2 PCのrelease E2E合格へ読み替えない。

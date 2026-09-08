@@ -125,16 +125,17 @@ bool AudioReceivePipeline::process_frame(const uint8_t* data, size_t length,
       (frame.flags & kFlagValid) != 0U &&
       frame.sample_count == kSamplesPerUsbFrame;
   if (source_changed) {
-    // A receiver can reboot while the source remains in alt=1.  In that case
-    // the source has no reason to emit another SESSION_START, but the first
-    // PCM frame after the already accepted SYNC still carries the authenticated
-    // boot nonce and a new session counter.  Re-arm that session only while
-    // the receiver is idle and the counter differs from the last ended one;
-    // stale PCM from an ended session remains fail-closed.
+    // A receiver can reboot, or a short transport gap can trip the source
+    // watchdog, while the source remains in alt=1. In either case the source
+    // has no reason to emit another SESSION_START, but the next PCM frame
+    // still carries the authenticated boot nonce and session counter. Re-arm
+    // only a synced, timed-out session (or a newly observed session counter);
+    // PCM from an explicitly ended session remains fail-closed.
     const bool recover_pcm_session =
         valid_pcm && source_session_.synced() && !source_session_.active() &&
         frame.boot_nonce == source_session_.boot_nonce() &&
-        frame.session_counter != source_session_.session_counter();
+        (source_session_.timed_out() ||
+         frame.session_counter != source_session_.session_counter());
     if ((!recover_pcm_session &&
          (frame.flags & kFlagSessionStart) == 0U) ||
         !source_session_.start_source(frame.boot_nonce,
