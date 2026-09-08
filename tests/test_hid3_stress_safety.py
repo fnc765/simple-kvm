@@ -98,7 +98,7 @@ def test_audio_probe_discovers_current_cdc_and_wasapi_devices_fail_closed():
 
 
 def test_audio_probe_ignores_short_startup_glitches_for_alignment():
-    probe = (REPO_ROOT / "tools" / "audio_test" / "_bp_e2e_probe.py").read_text(
+    probe = (REPO_ROOT / "tools" / "audio_test" / "waveform.py").read_text(
         encoding="utf-8"
     )
     assert "search_limit = min(len(captured), 131072)" in probe
