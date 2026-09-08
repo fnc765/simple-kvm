@@ -232,6 +232,42 @@ static int test_receive_pipeline()
   CHECK(pipeline.source_timeout(107U) == false);
   CHECK(pipeline.source_timeout(109U));
   CHECK(pipeline.diagnostics().source_timeouts == 1U);
+  // A transport gap can time out an otherwise active alt=1 source. The source
+  // does not emit another SESSION_START, so the first same-session PCM frame
+  // must re-arm the authenticated session instead of becoming permanently
+  // stale.
+  pipeline.set_capture_alt(1U);
+  frame.flags = kFlagValid;
+  frame.sequence = 14U;
+  frame.session_counter = 3U;
+  CHECK(encode_audio_frame(frame, bytes.data(), bytes.size()));
+  CHECK(pipeline.process_frame(bytes.data(), bytes.size(), 110U));
+  CHECK(pipeline.diagnostics().accepted_pcm_frames == 3U);
+  CHECK(pipeline.diagnostics().stale_session_controls == 0U);
+
+  // An explicitly ended session remains stale; timeout recovery must not
+  // weaken that fail-closed boundary.
+  AudioReceivePipeline ended;
+  CHECK(ended.accept_sync(sync) == SyncResult::kAcceptedNew);
+  ended.set_capture_alt(1U);
+  AudioFrame ended_start{};
+  ended_start.flags = kFlagSessionStart;
+  ended_start.sequence = 1U;
+  ended_start.boot_nonce = sync.boot_nonce;
+  ended_start.session_counter = 8U;
+  ended_start.sample_count = 0U;
+  CHECK(encode_audio_frame(ended_start, bytes.data(), bytes.size()));
+  CHECK(ended.process_frame(bytes.data(), bytes.size(), 1U));
+  CHECK(ended.accept_session_end(sync.boot_nonce, 8U));
+  AudioFrame ended_pcm{};
+  ended_pcm.flags = kFlagValid;
+  ended_pcm.sequence = 2U;
+  ended_pcm.boot_nonce = sync.boot_nonce;
+  ended_pcm.session_counter = 8U;
+  ended_pcm.sample_count = kSamplesPerUsbFrame;
+  CHECK(encode_audio_frame(ended_pcm, bytes.data(), bytes.size()));
+  CHECK(!ended.process_frame(bytes.data(), bytes.size(), 2U));
+  CHECK(ended.diagnostics().stale_session_controls == 1U);
   pipeline.update_uptime(12345U);
   pipeline.note_usb_mic_packet(kUsbPacketBytes);
   pipeline.note_usb_state(3U, 1U, 4U);  // initial configured state

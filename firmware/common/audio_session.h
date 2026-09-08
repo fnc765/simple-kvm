@@ -30,6 +30,10 @@ class SourceSessionState {
   EndResult end_source_result(uint32_t boot_nonce, uint16_t session_counter);
   bool matches(uint32_t boot_nonce, uint16_t session_counter) const;
   void timeout();
+  // A transport gap can make the receiver time out while the source remains
+  // in alt=1. The next frame from that same authenticated session may resume
+  // the stream, but an explicitly ended session must remain stale.
+  bool timed_out() const { return timed_out_; }
 
   bool synced() const { return synced_; }
   bool active() const { return active_; }
@@ -44,6 +48,7 @@ class SourceSessionState {
   uint32_t boot_nonce_;
   uint16_t session_counter_;
   uint32_t clear_count_;
+  bool timed_out_;
   bool last_end_valid_;
   uint32_t last_end_boot_nonce_;
   uint16_t last_end_session_counter_;
