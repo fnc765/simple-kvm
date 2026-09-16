@@ -15,6 +15,7 @@ __pycache__/
 
 # Local real-hardware verification evidence
 logs/hardware_loopback/
+logs/two_pc/
 
 # IDE
 .vscode/
