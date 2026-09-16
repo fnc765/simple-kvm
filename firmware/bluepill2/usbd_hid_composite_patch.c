@@ -1261,6 +1261,16 @@ uint8_t USBD_HID_ABS_MOUSE_SendReport(USBD_HandleTypeDef *pdev,
   return (uint8_t)USBD_OK;
 }
 
+uint8_t HID_Composite_mouse_isIdle(void)
+{
+  return (_hhid.Mousestate == HID_IDLE) ? 1U : 0U;
+}
+
+uint8_t HID_Composite_keyboard_isIdle(void)
+{
+  return (_hhid.Keyboardstate == HID_IDLE) ? 1U : 0U;
+}
+
 /**
   * @brief  HID_Composite_abs_mouse_isIdle
   *         Report whether the absolute-mouse IN endpoint can accept data.

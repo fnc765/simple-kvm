@@ -12,6 +12,19 @@
 #define PKT_KEYBOARD   0x01u  // 8-byte HID Boot Keyboard Report
 #define PKT_MOUSE      0x02u  // 5-byte HID Mouse Report (relative)
 #define PKT_MOUSE_ABS  0x03u  // 5-byte HID Absolute Mouse Report (Phase 3 firmware)
+#define PKT_GET_CAPS            0x20u
+#define PKT_GET_STATUS          0x21u
+#define PKT_GET_RUN_SNAPSHOT    0x22u
+#define PKT_AUDIO_RUN_START     0x23u
+#define PKT_AUDIO_RUN_END       0x24u
+#define PKT_CLEAR_COUNTERS      0x25u
+#define PKT_AUDIO_TEST_TONE     0x26u
+#define PKT_AUDIO_TEST_FAULT    0x27u
+#define PKT_AUDIO_TEST_MODE     0x28u
+#define PKT_AUDIO_CONTROL_SYNC  0x29u
+#define PKT_AUDIO_CONTROL_SYNC_ACK 0x2Au
+#define PKT_AUDIO_SESSION_END   0x2Bu
+#define PKT_AUDIO_RESPONSE      0x2Cu
 #define PKT_HEARTBEAT  0xFFu  // No payload (LEN=0)
 
 #define PKT_LEN_KEYBOARD    8u
@@ -38,6 +51,9 @@ typedef struct {
     uint8_t len;
     uint8_t payload[PKT_MAX_PAYLOAD];
 } Packet;
+
+uint8_t packet_encode(const Packet *packet, uint8_t *output,
+                      uint8_t output_capacity);
 
 // Parser context – zero-initialise before use
 typedef struct {

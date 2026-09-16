@@ -147,3 +147,41 @@ CRC-8 テーブル（256 エントリ）をあらかじめ計算し、1 バイ�
 1. LEN > 16 のパケットは即座に廃棄
 2. パケット受信中に 50 ms のタイムアウトが発生したらステートをリセット
 3. 受信中に `0xAA` が現れた場合は新たなパケットの開始として再同期
+
+---
+
+## Audio diagnostics (`GET_STATUS`, TYPE = `0x21`)
+
+Audio profileでは、既存のpage `0`を維持したまま、追加pageで累積counterを取得できます。
+request payloadは`page` 1 byte、responseは`AUDIO_RESPONSE` (TYPE `0x2C`, LEN `14`)で、
+payloadは次の形式です。
+
+```
+[device:u8, page:u8, a:u32, b:u32, c:u32] (little-endian)
+```
+
+BP2のpageは次の通りです。
+
+| page | a | b | c |
+|---:|---|---|---|
+| 0 | accepted_pcm_frames | spi_crc_error | underflow + overflow（互換） |
+| 1 | spi_rx_frames | accepted_pcm_frames | accepted_control_frames |
+| 2 | spi_sequence_gap | spi_overrun | spi_short_transfer |
+| 3 | spi_magic_error | spi_version_error | spi_crc_error |
+| 4 | spi_duplicate | underflow | overflow |
+| 5 | prefill_count | asrc_clamp_count | asrc_step_ppm（符号付きraw） |
+| 6 | ring_fill | ring_min | ring_max |
+| 7 | source_session_starts | source_session_ends | source_session_clears |
+| 8 | source_timeouts | stale_session_controls | control_sync_accepts |
+| 9 | capture_alt_transitions | capture_session_starts | capture_session_clears |
+| 10 | usb_mic_packets | usb_mic_bytes | usb_mic_reset |
+| 11 | usb_mic_suspend | usb_mic_resume | discarded_capture_closed |
+| 12 | hid_send_busy[0] | hid_send_busy[1] | hid_send_busy[2] |
+| 13 | hid_drop[0] | hid_drop[1] | hid_drop[2] |
+
+BP1も同じresponse形式で、page `0`は`usb_audio_packets`、`spi_pcm_frames`、
+`spi_deadline_miss`です。追加pageはsource側のoverwrite、DMA busy、USB検証、
+SYNC retry、frame/HID queue counterを返します。未知のpageにはresponseを返しません。
+
+Counterはstreamを停止せずに読み出せます。測定の合否判定は、開始・終了markerの
+snapshot差分を優先し、live statusの値だけで判定しません。

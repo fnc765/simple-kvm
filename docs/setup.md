@@ -126,11 +126,97 @@ VID/PID/Product string (`046D:C52B` / `Logitech` / `USB Receiver`) は Logitech 
 
 ---
 
+### 3.5.1. BP2 audio profileのUSB identity
+
+legacy profileとaudio profileは、同じLogitech系VIDを維持しつつPIDを分けます。
+
+| profile | VID:PID | Manufacturer / Product | 用途 |
+|---------|---------|------------------------|------|
+| `bluepill2_legacy` | `046D:C52B` | `Logitech` / `USB Receiver` | HID keyboard + relative mouse + absolute mouse |
+| `bluepill2_audio` | `046D:C52C` | `Logitech` / `USB Receiver` | 上記3 HID + UAC1 mono microphone |
+
+`046D:C52C` はリポジトリ内の検証用PIDであり、外部配布用のVID/PIDとして扱いません。
+PID変更だけでlegacyの`C52B`とは別のWindows hardware IDになるため、audio profileの
+`bcdDevice`は現行値から変更しません。audio用の検出はPIDに加えて、product string、
+`MI_00`〜`MI_03`、対象interfaceを確認し、別のLogitech機器を対象にしないfail-closed
+preflightを使用します。
+
+古い`C52B`の非表示デバイスが残っている場合は、まず対象を限定して一覧を確認します。
+
+```powershell
+Get-PnpDevice -PresentOnly | Where-Object {
+  $_.InstanceId -match 'VID_046D&PID_C52B'
+} | Select-Object Status,Class,FriendlyName,InstanceId
+```
+
+デバイス マネージャーで、一覧に出た`USB\VID_046D&PID_C52B...`の該当デバイスだけを
+「デバイスのアンインストール」してから再接続してください。ドライバーパッケージは
+削除せず、全USBデバイスやUSBクラス全体を削除する手順は実施しません。再接続後は
+audio profileが`046D:C52C`、legacy profileが`046D:C52B`であることを確認します。
+
+---
+
+### 3.5.2. audio + HID 同時試験のデバイス検出
+
+#### 検証時間ポリシー
+
+検証入口は毎回、開始前に `VERIFICATION_POLICY_REMINDER` を表示します。途中の
+検証は最大60秒、最後の統合検証だけ5分以上です。詳細は
+[verification-policy.md](verification-policy.md) を参照してください。
+
+`tools/audio_test/_bp_e2e_probe.py` は、固定の COM 番号や WASAPI endpoint GUID を
+使用しません。実行時に次を確認してから試験を開始します。
+
+- BP1 CDC: `0483:A1D0` が1ポートだけ存在すること
+- BP1 render: Friendly Name の `BP1 Audio Dev` または `USB Audio Device`（該当しない場合は active render が1件だけ）
+- BP2 capture: Friendly Name に `USB Receiver` を含む active endpoint が1件だけ存在すること
+- BP2 USB: `046D:C52C`、`USB Receiver`、`MI_00`〜`MI_03` の PnP preflight
+
+必要な場合だけ、検出結果に表示された値を環境変数で明示できます。指定値も再検証され、
+一致しなければ fail-closed で停止します。
+
+```powershell
+$env:BP_E2E_PORT = "COM10"
+$env:BP_E2E_RENDER_ID = "{0.0.0.00000000}.{...}"
+$env:BP_E2E_CAPTURE_ID = "{0.0.1.00000000}.{...}"
+```
+
+途中の audio + 3-interface HID 確認は、画面を占有する input shield が前面に表示されている
+対話デスクトップで30秒だけ実行します。中間確認では
+`HID3_INTERMEDIATE_PASS` が出ることを確認します。
+
+```powershell
+$log = "logs/hid3_intermediate_$(Get-Date -Format yyyyMMdd_HHmmss).log"
+$env:SIMPLE_KVM_VERIFICATION_STAGE = "intermediate"
+$env:BP_E2E_RUN_SECONDS = "30"
+.venv\Scripts\python.exe tools/audio_test/_bp_e2e_hid3_continuous.py 2>&1 |
+  Tee-Object -FilePath $log
+```
+
+input shield が前面を失った場合は入力注入を停止して fail-closed で終了します。試験中は別の
+ウィンドウをクリックせず、`HID3_CONTINUOUS_METRICS` と `AUDIO_SINGLE_HOST_PASS` の両方を
+ログで確認してください。
+
+すべての修正と短い確認が完了した後だけ、最後の統合確認を5分実行します。
+
+```powershell
+$log = "logs/hid3_final_integration_$(Get-Date -Format yyyyMMdd_HHmmss).log"
+$env:SIMPLE_KVM_VERIFICATION_STAGE = "final-integration"
+$env:BP_E2E_RUN_SECONDS = "300"
+.venv\Scripts\python.exe tools/audio_test/_bp_e2e_hid3_continuous.py 2>&1 |
+  Tee-Object -FilePath $log
+```
+
+---
+
 ## 3.6. 同一 PC での無人ハードウェアループバック検証
 
 BP1 の USB CDC と BP2 の USB HID を同じ Windows PC に接続すると、専用ハーネスで
 `PC -> BP1 CDC -> UART -> BP2 -> USB HID -> PC Raw Input` を人手なしで検証できます。
 通常の Simple KVM アプリは終了し、BP1–BP2 間の UART と GND を接続した状態で実行します。
+
+このハーネスはlegacy profileの検証用で、BP2を`046D:C52B`として識別します。audio
+profileのHID同時試験は`046D:C52C`専用ハーネスを使用してください。
 
 ```powershell
 python tools/hardware_loopback.py

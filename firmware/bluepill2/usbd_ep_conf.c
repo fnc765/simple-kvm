@@ -4,9 +4,9 @@
   * @brief   PATCH: Endpoint configuration with 4 endpoints for the 3-interface
   *          HID composite (Keyboard + Relative Mouse + Absolute Mouse)
   *
-  * This file overrides the framework's usbd_ep_conf.c.  The PlatformIO
-  * pre-link action weakens the framework object so these strong definitions
-  * are selected deterministically.
+  * Legacy builds weaken the framework's USB objects before link. Audio builds
+  * exclude the corresponding stock sources. In both profiles, the strong
+  * definitions in this file are selected deterministically.
   *
   * Original source:
   *   ~/.platformio/packages/framework-arduinoststm32/libraries/USBDevice/src/usbd_ep_conf.c
@@ -68,6 +68,9 @@ const ep_desc_t ep_def[] = {
   {HID_MOUSE_EPIN_ADDR,     PMA_MOUSE_IN_ADDR,    PCD_SNG_BUF},
   {HID_KEYBOARD_EPIN_ADDR,  PMA_KEYBOARD_IN_ADDR, PCD_SNG_BUF},
   {HID_ABS_MOUSE_EPIN_ADDR, PMA_ABS_MOUSE_IN_ADDR, PCD_SNG_BUF},
+#ifdef SIMPLE_KVM_AUDIO
+  {AUDIO_MIC_EPIN_ADDR,     PMA_AUDIO_IN_ADDR,     PCD_DBL_BUF},
+#endif
 };
 #endif
 #endif /* USBD_USE_HID_COMPOSITE */

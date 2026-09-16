@@ -194,6 +194,8 @@ uint32_t USBD_HID_GetPollingInterval(USBD_HandleTypeDef *pdev);
 extern "C" {
 #endif
 uint8_t HID_Composite_abs_mouse_sendReport(uint8_t *report, uint16_t len);
+uint8_t HID_Composite_mouse_isIdle(void);
+uint8_t HID_Composite_keyboard_isIdle(void);
 uint8_t HID_Composite_abs_mouse_isIdle(void);
 #ifdef __cplusplus
 }

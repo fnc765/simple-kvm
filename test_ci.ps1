@@ -6,6 +6,13 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSCommandPath
 Set-Location $projectRoot
 
+$policy = & python (Join-Path $projectRoot "tools\verification_policy.py") `
+    --name "local CI build verification" --stage intermediate
+$policy | ForEach-Object { Write-Host $_ }
+if ($LASTEXITCODE -ne 0) {
+    throw "VERIFICATION_POLICY_FAIL stage=local-ci"
+}
+
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host " LOCAL CI TEST — simple-kvm" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan

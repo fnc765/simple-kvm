@@ -46,6 +46,26 @@ uint8_t crc8_calc(const uint8_t *data, uint8_t len)
     return crc;
 }
 
+uint8_t packet_encode(const Packet *packet, uint8_t *output,
+                      uint8_t output_capacity)
+{
+    if (packet == nullptr || output == nullptr ||
+        packet->len > PKT_MAX_PAYLOAD) {
+        return 0;
+    }
+    const uint8_t total = static_cast<uint8_t>(packet->len + 4U);
+    if (output_capacity < total) {
+        return 0;
+    }
+    output[0] = PKT_START;
+    output[1] = packet->type;
+    output[2] = packet->len;
+    memcpy(&output[3], packet->payload, packet->len);
+    output[3U + packet->len] = crc8_calc(&output[1],
+                                         static_cast<uint8_t>(packet->len + 2U));
+    return total;
+}
+
 #define PARSER_TIMEOUT_MS 50u
 
 void parser_init(PacketParser *p)
