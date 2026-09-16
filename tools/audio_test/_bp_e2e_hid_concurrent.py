@@ -37,6 +37,10 @@ from tools.bp2_identity import (  # noqa: E402
     BP2_AUDIO_VID,
     bp2_audio_pnp_preflight,
 )
+from tools.verification_policy import (  # noqa: E402
+    VerificationPolicyError,
+    preflight,
+)
 
 
 def main() -> int:
@@ -45,6 +49,19 @@ def main() -> int:
     os.environ.setdefault("BP_E2E_RENDER_MIX", "0")
     os.environ.setdefault("BP_E2E_CAPTURE_MIX", "0")
     os.environ.setdefault("BP_E2E_RAW", "0")
+
+    try:
+        verification_plan = preflight(
+            "audio + HID smoke",
+            float(os.environ["BP_E2E_RUN_SECONDS"]),
+        )
+    except (KeyError, ValueError, VerificationPolicyError) as exc:
+        print(
+            "AUDIO_HID_SIMULTANEOUS_FAIL: verification policy: "
+            f"{exc}",
+            flush=True,
+        )
+        return 2
 
     hid._configure_win32()
     if _desktop_attach_error is not None:
@@ -211,6 +228,8 @@ def main() -> int:
     concurrent_pass = concurrent_pass and not safety_lost.is_set()
     print("AUDIO_HID_SIMULTANEOUS_METRICS", {
         "audio_pass_marker": audio_pass,
+        "verification_stage": verification_plan.stage,
+        "verification_duration_s": verification_plan.planned_seconds,
         "target_candidates": target_candidates,
         "absolute_events": len(absolute),
         "button_events": len(button),

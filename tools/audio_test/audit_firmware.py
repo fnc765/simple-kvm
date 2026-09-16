@@ -6,8 +6,15 @@ import argparse
 import re
 import struct
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tools.verification_policy import preflight
 
 
 FLASH_BASE = 0x08000000
@@ -104,6 +111,7 @@ def main() -> int:
                         default=Path.home() / ".platformio" / "packages" /
                                 "toolchain-gccarmnoneeabi" / "bin")
     args = parser.parse_args()
+    preflight(f"ELF audit {args.env}")
 
     config = PROFILES[args.env]
     build_dir = args.repo / ".pio" / "build" / args.env

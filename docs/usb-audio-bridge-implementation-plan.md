@@ -979,6 +979,10 @@ one-PC HILは経路全体を検査できるが、2台の独立host clockを十�
 
 ### 16.8 Layer H: two-PC E2E
 
+運用上の検証時間ポリシー（途中確認は最大60秒、最終統合確認は5分以上）は、
+この計画の長時間release/nightly gateとは別の実施順序として適用する。通常の修正確認で
+60分・6時間試験を自動開始してはならず、最終統合確認の実施時だけ明示的に選択する。
+
 controller PCとtarget agent PCを分ける。
 
 - 30秒smoke: AUDIO_E2E_SMOKE_PASS

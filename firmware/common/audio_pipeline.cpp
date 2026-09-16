@@ -136,6 +136,11 @@ bool AudioReceivePipeline::process_frame(const uint8_t* data, size_t length,
         frame.boot_nonce == source_session_.boot_nonce() &&
         (source_session_.timed_out() ||
          frame.session_counter != source_session_.session_counter());
+    const bool timed_out_same_session =
+        valid_pcm && source_session_.synced() && !source_session_.active() &&
+        source_session_.timed_out() &&
+        frame.boot_nonce == source_session_.boot_nonce() &&
+        frame.session_counter == source_session_.session_counter();
     if ((!recover_pcm_session &&
          (frame.flags & kFlagSessionStart) == 0U) ||
         !source_session_.start_source(frame.boot_nonce,
@@ -146,7 +151,14 @@ bool AudioReceivePipeline::process_frame(const uint8_t* data, size_t length,
     diagnostics_.source_boot_nonce = frame.boot_nonce;
     diagnostics_.source_session_counter = frame.session_counter;
     ++diagnostics_.source_session_starts;
-    clear_stream(true);
+    // A source watchdog trip can be caused by a transient scheduling gap
+    // while the source remains in alt=1. Keep buffered PCM and ASRC phase for
+    // that same authenticated session; a true source stop will drain the
+    // ring and render() will fail closed through its normal underflow reset.
+    // New sessions and explicit control transitions still clear/prefill.
+    if (!timed_out_same_session) {
+      clear_stream(true);
+    }
   }
 
   const SequenceResult sequence_result = sequence_.observe(frame.sequence);
@@ -222,7 +234,11 @@ bool AudioReceivePipeline::source_timeout(uint32_t now_ms)
   have_source_time_ = false;
   source_session_.timeout();
   ++diagnostics_.source_timeouts;
-  clear_stream(true);
+  // Do not discard the buffered tail on a short watchdog trip.  This avoids
+  // an unnecessary prefill-sized silence when the authenticated source
+  // resumes.  If the source is genuinely absent, the ring drains and
+  // AudioAsrc::render() emits zeroes and resets itself at underflow.  Explicit
+  // SESSION_END, MUTE, SYNC, and session changes still use clear_stream().
   return true;
 }
 
