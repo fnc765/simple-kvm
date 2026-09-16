@@ -38,6 +38,10 @@ from tools.audio_test.render_buffer import (  # noqa: E402
     pcm_payload, writable_frames, write_render_packet,
 )
 from tools.audio_test.capture_buffer import read_capture_packet  # noqa: E402
+from tools.verification_policy import (  # noqa: E402
+    VerificationPolicyError,
+    preflight,
+)
 BP1_AUDIO_VID = 0x0483
 BP1_AUDIO_PID = 0xA1D0
 BP2_AUDIO_PRODUCT = "USB Receiver"
@@ -459,6 +463,24 @@ def frame(kind, payload=b""):
 
 
 def main():
+    capture_only = len(sys.argv) > 1 and sys.argv[1] == "--capture-only"
+    try:
+        planned_seconds = (
+            3.0
+            if capture_only
+            else float(os.environ.get("BP_E2E_RUN_SECONDS", "8.5"))
+        )
+        verification_plan = preflight(
+            "BP1/BP2 live audio probe", planned_seconds
+        )
+    except (ValueError, VerificationPolicyError) as exc:
+        print(
+            "AUDIO_SINGLE_HOST_FAIL",
+            {"reasons": ["verification_policy", str(exc)]},
+            flush=True,
+        )
+        return 2
+
     identity = bp2_audio_pnp_preflight()
     print("BP2_AUDIO_PNP_PREFLIGHT", identity)
     if not identity["ok"]:
@@ -482,7 +504,7 @@ def main():
 
     port = serial.Serial(port_name, 115200, timeout=0.001)
     port.reset_input_buffer()
-    if len(sys.argv) > 1 and sys.argv[1] == "--capture-only":
+    if capture_only:
         send_control(port, 0x26, b"\x01", drain=0.05)
 
         capture_client = activate_client(capture_id)
@@ -627,7 +649,7 @@ def main():
     captured = bytearray()
     capture_flags = {}
     start_time = time.monotonic()
-    run_seconds = float(os.environ.get("BP_E2E_RUN_SECONDS", "8.5"))
+    run_seconds = float(verification_plan.planned_seconds or 0.0)
     render_done_time = None
     last_report = start_time
     last_live_status = start_time

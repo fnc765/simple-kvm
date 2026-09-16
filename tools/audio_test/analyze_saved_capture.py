@@ -13,6 +13,7 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.audio_test.waveform import analyze_capture, make_signal, numeric_failures
+from tools.verification_policy import preflight
 
 
 def positive_seconds(value):
@@ -29,6 +30,7 @@ def main(argv=None):
     parser.add_argument('--continuous', action='store_true',
                         help='Also check the entire active recording for gaps; use only for repeated-body runs')
     args = parser.parse_args(argv)
+    preflight('saved capture analysis')
     try:
         size = args.capture.stat().st_size
         if size == 0 or size % 2:

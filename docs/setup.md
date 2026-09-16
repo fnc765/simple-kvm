@@ -158,6 +158,12 @@ audio profileが`046D:C52C`、legacy profileが`046D:C52B`であることを確�
 
 ### 3.5.2. audio + HID 同時試験のデバイス検出
 
+#### 検証時間ポリシー
+
+検証入口は毎回、開始前に `VERIFICATION_POLICY_REMINDER` を表示します。途中の
+検証は最大60秒、最後の統合検証だけ5分以上です。詳細は
+[verification-policy.md](verification-policy.md) を参照してください。
+
 `tools/audio_test/_bp_e2e_probe.py` は、固定の COM 番号や WASAPI endpoint GUID を
 使用しません。実行時に次を確認してから試験を開始します。
 
@@ -175,12 +181,14 @@ $env:BP_E2E_RENDER_ID = "{0.0.0.00000000}.{...}"
 $env:BP_E2E_CAPTURE_ID = "{0.0.1.00000000}.{...}"
 ```
 
-60分の audio + 3-interface HID 試験は、画面を占有する input shield が前面に表示されている
-対話デスクトップで実行します。`HID3_CONTINUOUS_PASS` が出るまで試験完了とは扱いません。
+途中の audio + 3-interface HID 確認は、画面を占有する input shield が前面に表示されている
+対話デスクトップで30秒だけ実行します。中間確認では
+`HID3_INTERMEDIATE_PASS` が出ることを確認します。
 
 ```powershell
-$log = "logs/hid3_continuous_60m_$(Get-Date -Format yyyyMMdd_HHmmss).log"
-$env:BP_E2E_RUN_SECONDS = "3600"
+$log = "logs/hid3_intermediate_$(Get-Date -Format yyyyMMdd_HHmmss).log"
+$env:SIMPLE_KVM_VERIFICATION_STAGE = "intermediate"
+$env:BP_E2E_RUN_SECONDS = "30"
 .venv\Scripts\python.exe tools/audio_test/_bp_e2e_hid3_continuous.py 2>&1 |
   Tee-Object -FilePath $log
 ```
@@ -188,6 +196,16 @@ $env:BP_E2E_RUN_SECONDS = "3600"
 input shield が前面を失った場合は入力注入を停止して fail-closed で終了します。試験中は別の
 ウィンドウをクリックせず、`HID3_CONTINUOUS_METRICS` と `AUDIO_SINGLE_HOST_PASS` の両方を
 ログで確認してください。
+
+すべての修正と短い確認が完了した後だけ、最後の統合確認を5分実行します。
+
+```powershell
+$log = "logs/hid3_final_integration_$(Get-Date -Format yyyyMMdd_HHmmss).log"
+$env:SIMPLE_KVM_VERIFICATION_STAGE = "final-integration"
+$env:BP_E2E_RUN_SECONDS = "300"
+.venv\Scripts\python.exe tools/audio_test/_bp_e2e_hid3_continuous.py 2>&1 |
+  Tee-Object -FilePath $log
+```
 
 ---
 

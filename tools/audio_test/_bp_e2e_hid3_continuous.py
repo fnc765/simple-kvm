@@ -3,7 +3,9 @@
 The BP1 CDC port is exclusive on Windows, so audio and HID traffic are
 injected through one locked serial handle.  Raw Input is observed for all
 three BP2 HID interfaces while the normal audio probe runs.  Set
-``BP_E2E_RUN_SECONDS`` to the desired duration (the release check uses 3600).
+``BP_E2E_RUN_SECONDS`` to the desired duration.  Intermediate runs are capped
+at 60 seconds; set ``SIMPLE_KVM_VERIFICATION_STAGE=final-integration`` for the
+single final integration run, which must be at least five minutes.
 Mouse reports are sent only while the full-screen foreground input shield is
 confirmed; if the shield cannot be shown or loses focus, injection stops or
 the run fails closed.
@@ -48,6 +50,11 @@ from tools.bp2_identity import (  # noqa: E402
     BP2_AUDIO_PID,
     BP2_AUDIO_VID,
     bp2_audio_pnp_preflight,
+)
+from tools.verification_policy import (  # noqa: E402
+    FINAL_INTEGRATION_STAGE,
+    VerificationPolicyError,
+    preflight,
 )
 
 
@@ -237,11 +244,18 @@ class SharedSerial:
 
 def main() -> int:
     os.environ.setdefault("BP_E2E_EXCLUSIVE", "1")
-    os.environ.setdefault("BP_E2E_RUN_SECONDS", "3600")
+    os.environ.setdefault("BP_E2E_RUN_SECONDS", "30")
     os.environ.setdefault("BP_E2E_RENDER_MIX", "0")
     os.environ.setdefault("BP_E2E_CAPTURE_MIX", "0")
     os.environ.setdefault("BP_E2E_RAW", "0")
     os.environ["BP_E2E_CONTINUOUS_NONZERO"] = "1"
+
+    try:
+        duration = float(os.environ["BP_E2E_RUN_SECONDS"])
+        verification_plan = preflight("three-HID continuous audio", duration)
+    except (KeyError, ValueError, VerificationPolicyError) as exc:
+        print(f"HID3_CONTINUOUS_FAIL: verification policy: {exc}", flush=True)
+        return 2
 
     hid._configure_win32()
     if _desktop_attach_error is not None:
@@ -298,9 +312,10 @@ def main() -> int:
     original_sleep = audio.time.sleep
     original_monotonic = audio.time.monotonic
     serial_proxy: SharedSerial | None = None
+    injector_thread: threading.Thread | None = None
 
     def open_serial(*args, **kwargs):
-        nonlocal serial_proxy
+        nonlocal injector_thread, serial_proxy
         if not monitor.safety_ok():
             raise RuntimeError(
                 f"HID3_SAFETY_FAIL before injection: {monitor.safety_failure}"
@@ -324,8 +339,17 @@ def main() -> int:
                 )
                 cycle_period = 1.0 / hid_hz
                 next_cycle = original_monotonic()
+                # Stop injecting slightly before the audio window ends so
+                # the final key-up/button-up reports can drain through the
+                # shared CDC/HID path before the serial handle is closed.
+                drain_seconds = min(
+                    2.0, max(0.5, (verification_plan.planned_seconds or 0.0) * 0.1)
+                )
                 deadline = original_monotonic() + float(
-                    os.environ.get("BP_E2E_RUN_SECONDS", "3600")
+                    max(
+                        0.0,
+                        (verification_plan.planned_seconds or 0.0) - drain_seconds,
+                    )
                 )
                 while (
                     not stop.is_set()
@@ -371,10 +395,26 @@ def main() -> int:
                         # Do not accumulate an unbounded backlog if the USB
                         # stack briefly stalls; resume at the next cycle.
                         next_cycle = original_monotonic()
+                if (
+                    not stop.is_set()
+                    and injection_enabled.is_set()
+                    and monitor.foreground_safe()
+                    and serial_proxy is not None
+                ):
+                    for packet in (
+                        build_keyboard_report(0, []),
+                        build_mouse_report(0, 0, 0),
+                    ):
+                        serial_proxy.write(packet)
+                        serial_proxy.flush()
+                    original_sleep(drain_seconds)
             except Exception as exc:
                 print(f"HID3_INJECT_EXCEPTION: {exc}", flush=True)
 
-        threading.Thread(target=injector, name="hid3-injector", daemon=True).start()
+        injector_thread = threading.Thread(
+            target=injector, name="hid3-injector", daemon=True
+        )
+        injector_thread.start()
         return serial_proxy
 
     pump_last = [0.0]
@@ -411,6 +451,12 @@ def main() -> int:
         print(f"AUDIO_MAIN_EXCEPTION: {exc}", flush=True)
     finally:
         stop.set()
+        # Let an in-flight cycle deliver its matching keyboard break report
+        # before the Raw Input monitor is closed.  This keeps short bounded
+        # runs fail-safe and prevents a test-window teardown from fabricating
+        # an unbalanced make/break result.
+        if injector_thread is not None:
+            injector_thread.join(timeout=1.0)
         audio.serial.Serial = original_serial
         audio.time.sleep = original_sleep
         audio.time.monotonic = original_monotonic
@@ -431,10 +477,22 @@ def main() -> int:
         and keyboard_balanced
     )
     safety_pass = not safety_lost.is_set() and monitor.safety_ok()
-    duration = float(os.environ.get("BP_E2E_RUN_SECONDS", "3600"))
-    continuous_pass = audio_pass and duration >= 3600.0 and hid_pass and safety_pass
+    duration = float(verification_plan.planned_seconds or 0.0)
+    continuous_pass = audio_pass and hid_pass and safety_pass
+    if verification_plan.stage == FINAL_INTEGRATION_STAGE:
+        result_marker = (
+            "HID3_CONTINUOUS_PASS" if continuous_pass else "HID3_CONTINUOUS_FAIL"
+        )
+    else:
+        result_marker = (
+            "HID3_INTERMEDIATE_PASS"
+            if continuous_pass
+            else "HID3_INTERMEDIATE_FAIL"
+        )
     print("HID3_CONTINUOUS_METRICS", {
         "audio_pass_marker": audio_pass,
+        "verification_stage": verification_plan.stage,
+        "verification_duration_s": duration,
         "duration_s": duration,
         "target_mouse_devices": target_mice,
         "relative_mouse_events": relative_events,
@@ -448,7 +506,7 @@ def main() -> int:
         "last_keyboard_events": monitor.keyboard_events[-4:],
     }, flush=True)
     print(
-        "HID3_CONTINUOUS_PASS" if continuous_pass else "HID3_CONTINUOUS_FAIL",
+        result_marker,
         flush=True,
     )
 

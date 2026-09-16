@@ -245,6 +245,34 @@ static int test_receive_pipeline()
   CHECK(pipeline.diagnostics().accepted_pcm_frames == 3U);
   CHECK(pipeline.diagnostics().stale_session_controls == 0U);
 
+  // A short source watchdog trip must preserve the buffered tail and ASRC
+  // phase.  The next PCM frame from the same authenticated session resumes
+  // without forcing another ring clear/prefill cycle.
+  AudioReceivePipeline timeout_recovery;
+  CHECK(timeout_recovery.accept_sync(sync) == SyncResult::kAcceptedNew);
+  timeout_recovery.set_capture_alt(1U);
+  AudioFrame timeout_frame{};
+  timeout_frame.flags = kFlagValid;
+  timeout_frame.boot_nonce = sync.boot_nonce;
+  timeout_frame.session_counter = 9U;
+  timeout_frame.sample_count = kSamplesPerUsbFrame;
+  for (uint16_t i = 0U; i < 2U; ++i) {
+    timeout_frame.sequence = static_cast<uint16_t>(i + 1U);
+    CHECK(encode_audio_frame(timeout_frame, bytes.data(), bytes.size()));
+    CHECK(timeout_recovery.process_frame(
+        bytes.data(), bytes.size(), static_cast<uint32_t>(100U + i)));
+  }
+  CHECK(timeout_recovery.diagnostics().ring_fill ==
+        static_cast<uint16_t>(2U * kSamplesPerUsbFrame));
+  CHECK(timeout_recovery.source_timeout(105U));
+  CHECK(timeout_recovery.diagnostics().ring_fill ==
+        static_cast<uint16_t>(2U * kSamplesPerUsbFrame));
+  timeout_frame.sequence = 3U;
+  CHECK(encode_audio_frame(timeout_frame, bytes.data(), bytes.size()));
+  CHECK(timeout_recovery.process_frame(bytes.data(), bytes.size(), 106U));
+  CHECK(timeout_recovery.diagnostics().ring_fill ==
+        static_cast<uint16_t>(3U * kSamplesPerUsbFrame));
+
   // An explicitly ended session remains stale; timeout recovery must not
   // weaken that fail-closed boundary.
   AudioReceivePipeline ended;

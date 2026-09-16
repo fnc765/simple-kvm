@@ -5,6 +5,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$policy = & python (Join-Path $repoRoot "tools\verification_policy.py") `
+    --name "native audio unit test" --stage intermediate --duration 60
+$policy | ForEach-Object { Write-Host $_ }
+if ($LASTEXITCODE -ne 0) {
+    throw "VERIFICATION_POLICY_FAIL stage=native"
+}
 $vswhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
 if (-not (Test-Path -LiteralPath $vswhere)) {
     throw "AUDIO_FAIL stage=native prerequisite=vswhere"

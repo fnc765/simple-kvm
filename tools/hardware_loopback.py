@@ -49,6 +49,7 @@ from app.core.hardware_loopback import (  # noqa: E402
 from app.core.protocol import HID_ABS_MAX, build_mouse_abs_report  # noqa: E402
 from app.core.serial_comm import SerialComm  # noqa: E402
 from tools.hid_desktop import attach_to_input_desktop  # noqa: E402
+from tools.verification_policy import preflight  # noqa: E402
 
 
 BP1_VID = 0x0483
@@ -555,6 +556,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    preflight("legacy HID loopback", planned_seconds=60.0)
     stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
     output_dir = args.output_dir or REPO_ROOT / "logs" / "hardware_loopback" / stamp
     output_dir.mkdir(parents=True, exist_ok=True)

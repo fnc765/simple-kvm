@@ -1,15 +1,17 @@
 # Audio probe オフライン修正・検証（2026-09-08）
 
 対象: `codex/usb-audio-bridge`、ホスト側修正のベース `fe0b671`、前回の実機検証時点 `754975f`。
-この追補では USB/COM オープン、音声/HID送信、reset、flash、再列挙操作を実施していない。
+以下のオフライン追補は **2026-09-08時点** の記録であり、その時点では USB/COM オープン、
+音声/HID送信、reset、flash、再列挙操作を実施していない。
 前半は PC 上の検証ツールとテストの修正、追補では実機ログから特定した BP2 の session-timeout 復帰を
-`firmware/common` に修正した。修正後バイナリはまだ実機へ書き込んでいない。
+`firmware/common` に修正した。2026-09-08時点では修正後バイナリを実機へ書き込んでいない。
 
 ## 結論と証拠の境界
 
 PC 側検証コードのバッファ範囲外アクセスを修正し、保存録音に見られる次周回PCM混入に対する送信ガードを追加した。
 ソフトウェア上の再現・回帰テスト、全構成ビルド、ELF監査は合格。
-ただし、session-timeout 修正後の実機相関値改善、USBドライバの実際のカーソル挙動、60分のAudio/HID同時動作は未検証であり、実機復旧済みとは扱わない。
+ただし、2026-09-08時点では session-timeout 修正後の実機相関値改善、USBドライバの実際のカーソル挙動、
+60分のAudio/HID同時動作は未検証であり、実機復旧済みとは扱わない（2026-09-16の追補結果は後述）。
 以前の「BP2のリセットが必要」という説明だけでは、以下のホスト側異常を説明できない。
 
 ## 保存録音から確認したこと
@@ -121,6 +123,30 @@ timeout→PCM復帰と、明示的 END 後の同一 session PCM拒否を別々�
 この60分結果は今回の timeout-recovery 修正を含まないため、修正後の実機合格証拠ではない。
 修正後 ELF はビルド・native 回帰・descriptor/PMA audit までで、flash および再実機試験は未実施である。
 
+## 実機フォローアップ（2026-09-16）
+
+`f96e4c6` の firmware 修正後に BP2 (`046D:C52C`) へ flash し、OpenOCD の Verify OK、
+Resetting Target、PlatformIO SUCCESS を確認した。OpenOCD の target voltage warning は表示されたため、
+電源条件は引き続き注意する。今回の実機試験は同一PC上の one-PC HIL であり、独立2台のhost clockを
+証明する `AUDIO_E2E_PASS` ではなく `AUDIO_SINGLE_HOST_PASS` として記録する。
+
+| 試験 | 結果 |
+| --- | --- |
+| Python全テスト | **275 passed**、検証hookの経過時間上限（60秒）内 |
+| C++ native audio | **AUDIO_UNIT_PASS tests=2859** |
+| BP1/BP2 audio・legacy build | **4構成 SUCCESS** |
+| BP2 ELF descriptor/PMA audit | **AUDIO_ELF_AUDIT_PASS**、046D:C52C、183 byte、384/512 byte |
+| 10秒 exclusive audio | **AUDIO_SINGLE_HOST_PASS**、PRBS p05 0.999929、gap 0 |
+| 30秒 Audio/HID3 intermediate | **HID3_INTERMEDIATE_PASS**、keyboard make/break balanced |
+| 300秒 final integration（Audio＋HID3） | **AUDIO_SINGLE_HOST_PASS / HID3_CONTINUOUS_PASS**、14,400,000 frames、unexpected zero run 0、keyboard make/break 12,905/12,905 |
+
+すべての入口で `VERIFICATION_POLICY_REMINDER` を先に出し、途中確認は60秒以下、最終統合確認は
+300秒以上でなければデバイスを開かない。今回の最終ログは
+`logs/hid3_final_integration_after_timeout_gap_fix_20260916.log` に保存した。
+
+独立2台PCのtwo-PC E2E、物理抜き差し・電源サイクルを含むreconnect/recovery matrix、6時間soakは、
+別のtarget PCまたは自動電源設備が必要なため、この作業環境では未実施であり、release gateへは繰り上げない。
+
 ログは `logs/offline_*_20260908.log` に保存。
 詳細な保存波形照合は `logs/inspect_saved_audio.py` と `logs/offline_ring_diagnostic_20260908.log`。
 生PCMや実行ログはGitに追加していない。
@@ -145,6 +171,5 @@ python tools/audio_test/audit_firmware.py --env bluepill1_audio
 python tools/audio_test/audit_firmware.py --env bluepill2_audio
 ```
 
-`pio run` にupload targetは指定しない。
-実機を再び使用できる時点で、修正後 binary による10秒baseline、短時間Audio/HID、連続試験を改めて行う必要がある。
-今回のオフライン合格を実機や独立2 PCのrelease E2E合格へ読み替えない。
+`pio run` にupload targetは指定しない。修正後 binary の10秒baseline、短時間Audio/HID、
+300秒の最終統合確認は上記のとおり完了した。今回の実機結果を独立2 PCのrelease E2E合格へ読み替えない。
