@@ -102,6 +102,32 @@ def audit_descriptor(descriptor: bytes, config: dict[str, object]) -> None:
     assert endpoint_size in descriptor
 
 
+def audit_hid_report_lengths(descriptor: bytes,
+                             symbol_table: dict[str, tuple[int, int]]) -> None:
+    """Reject USB-advertised lengths that truncate a linked HID descriptor."""
+    report_symbols = {
+        0: "HID_KEYBOARD_ReportDesc",
+        1: "HID_MOUSE_ReportDesc",
+        2: "HID_ABS_MOUSE_ReportDesc",
+    }
+    interface = None
+    found = set()
+    offset = 0
+    while offset < len(descriptor):
+        length, kind = descriptor[offset:offset + 2]
+        assert length >= 2 and offset + length <= len(descriptor)
+        if kind == 4:
+            interface = descriptor[offset + 2]
+        elif kind == 0x21 and interface in report_symbols:
+            symbol = report_symbols[interface]
+            advertised = int.from_bytes(descriptor[offset + 7:offset + 9], "little")
+            assert advertised == symbol_table[symbol][1], (symbol, advertised,
+                                                          symbol_table[symbol][1])
+            found.add(interface)
+        offset += length
+    assert found == set(report_symbols)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", choices=sorted(PROFILES), required=True)
@@ -129,6 +155,8 @@ def main() -> int:
         symbol_table, str(config["descriptor"]), binary, FLASH_BASE,
         int(config["descriptor_size"]))
     audit_descriptor(descriptor, config)
+    if args.env == "bluepill2_audio":
+        audit_hid_report_lengths(descriptor, symbol_table)
 
     ep_blob = linked_bytes(symbol_table, "ep_def", binary, FLASH_BASE,
                            len(config["ep_def"]) * 12)

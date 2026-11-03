@@ -10,6 +10,7 @@
 #include "audio_pipeline.h"
 #include "audio_ring.h"
 #include "audio_session.h"
+#include "hid_report_queue.h"
 
 using namespace simple_kvm::audio;
 
@@ -438,11 +439,83 @@ static int test_accelerated_drift()
   return 0;
 }
 
+static int test_hid_report_queue()
+{
+  simple_kvm::HidReportQueue queue;
+  const uint8_t wheel_up[5] = {0, 0, 0, 1, 0};
+  CHECK(queue.front() == nullptr);
+  queue.pop();
+
+  // Repeated ticks with identical button state must not replace one another.
+  for (unsigned i = 0; i < 3U; ++i) {
+    CHECK(queue.push(wheel_up, sizeof(wheel_up)));
+  }
+  CHECK(queue.size() == 3U);
+  for (unsigned i = 0; i < 3U; ++i) {
+    CHECK(queue.front() != nullptr);
+    CHECK(std::memcmp(queue.front(), wheel_up, sizeof(wheel_up)) == 0);
+    queue.pop();
+  }
+  CHECK(queue.size() == 0U);
+
+  // Wheel/motion/direction changes and button edges keep their original order.
+  const std::array<std::array<uint8_t, 5>, 6> reports{{
+      {{0, 0, 0, 1, 0}}, {{0, 5, 0, 0, 0}}, {{0, 0, 0, 0xFF, 0}},
+      {{1, 0, 0, 0, 0}}, {{1, 0, 0, 2, 0}}, {{0, 0, 0, 0, 0}},
+  }};
+  for (const auto &report : reports) {
+    CHECK(queue.push(report.data(), static_cast<uint8_t>(report.size())));
+  }
+  for (const auto &report : reports) {
+    CHECK(queue.front() != nullptr);
+    CHECK(std::memcmp(queue.front(), report.data(), report.size()) == 0);
+    queue.pop();
+  }
+
+  // A full queue refuses new input without corrupting already admitted ticks.
+  // Drain/refill half of it to also exercise ring wraparound.
+  for (uint8_t i = 0; i < queue.kCapacity; ++i) {
+    const uint8_t report[5] = {0, 0, 0, i, 0};
+    CHECK(queue.push(report, sizeof(report)));
+  }
+  CHECK(!queue.push(wheel_up, sizeof(wheel_up)));
+  for (uint8_t i = 0; i < queue.kCapacity / 2U; ++i) {
+    CHECK(queue.front()[3] == i);
+    queue.pop();
+  }
+  for (uint8_t i = queue.kCapacity; i < queue.kCapacity * 3U / 2U; ++i) {
+    const uint8_t report[5] = {0, 0, 0, i, 0};
+    CHECK(queue.push(report, sizeof(report)));
+  }
+  for (uint8_t i = queue.kCapacity / 2U; i < queue.kCapacity * 3U / 2U; ++i) {
+    CHECK(queue.front()[3] == i);
+    queue.pop();
+  }
+  CHECK(queue.front() == nullptr);
+
+  // Keyboard reports share this FIFO; invalid sizes must leave it unchanged.
+  const uint8_t keyboard[8] = {0, 0, 4, 0, 0, 0, 0, 0};
+  const uint8_t oversized[9] = {};
+  CHECK(queue.push(keyboard, sizeof(keyboard)));
+  CHECK(!queue.push(nullptr, 5U));
+  CHECK(!queue.push(wheel_up, 0U));
+  CHECK(!queue.push(oversized, sizeof(oversized)));
+  CHECK(queue.size() == 1U);
+  CHECK(std::memcmp(queue.front(), keyboard, sizeof(keyboard)) == 0);
+  queue.clear();
+  CHECK(queue.front() == nullptr);
+  CHECK(queue.size() == 0U);
+  CHECK(queue.push(wheel_up, sizeof(wheel_up)));
+  CHECK(std::memcmp(queue.front(), wheel_up, sizeof(wheel_up)) == 0);
+  return 0;
+}
+
 int main()
 {
   if (test_crc_and_frame() != 0 || test_sequence_and_session() != 0 ||
       test_boot_barrier_and_sync_retry() != 0 ||
       test_receive_pipeline() != 0 ||
+      test_hid_report_queue() != 0 ||
       test_ring() != 0 || test_asrc_vectors() != 0 ||
       test_accelerated_drift() != 0) {
     return 1;

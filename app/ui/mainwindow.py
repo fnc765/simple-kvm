@@ -300,6 +300,7 @@ class MainWindow(QMainWindow):
         self._center        = QPoint()       # VideoWidget centre in global coords
         self._input_state   = InputState()
         self._warp_pending  = False          # True while cursor warp is in-flight
+        self._wheel_remainder = 0           # Qt angle units; 120 per HID tick
 
         # Click that initiated KVM focus, in widget-local coordinates.
         # Used by ``hybrid`` mode to compute the absolute jump target.
@@ -860,6 +861,7 @@ class MainWindow(QMainWindow):
         if self._kvm_active == active:
             return
         self._kvm_active = active
+        self._wheel_remainder = 0
 
         # Refresh the effective mouse mode (settings may have changed
         # while KVM was inactive).  ``_effective_mode`` accounts for
@@ -1362,9 +1364,16 @@ class MainWindow(QMainWindow):
         if not self._kvm_active:
             return
 
-        delta   = event.angleDelta().y()
-        wheel_v = 1 if delta > 0 else (-1 if delta < 0 else 0)
-        if wheel_v:
+        # Qt supplies eighths of a degree: 120 units are one wheel detent.
+        # Keep fine-resolution fractions and preserve accelerated multi-tick
+        # events instead of reducing every nonzero event to a single tick.
+        total = self._wheel_remainder + event.angleDelta().y()
+        ticks = abs(total) // 120
+        if total < 0:
+            ticks = -ticks
+        self._wheel_remainder = total - ticks * 120
+        while ticks:
+            wheel_v = max(-127, min(127, ticks))
             # Absolute and relative mouse interfaces maintain independent
             # button state.  Never mirror an absolute held button onto the
             # relative interface merely to transport a wheel tick.
@@ -1379,6 +1388,7 @@ class MainWindow(QMainWindow):
                     0, 0, wheel_v,
                 )
             )
+            ticks -= wheel_v
 
     # -------------------------------------------------------------------------
     # Keyboard events

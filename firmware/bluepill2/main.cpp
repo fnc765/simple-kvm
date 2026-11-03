@@ -15,6 +15,7 @@
 #include "../common/build_info.h"
 #include "hid_handler.h"
 #ifdef SIMPLE_KVM_AUDIO
+#include "../common/hid_report_queue.h"
 #include "audio_spi_slave.h"
 #include "audio_usb_mic.h"
 #endif
@@ -259,63 +260,12 @@ static bool handle_audio_control(const Packet *packet)
 }
 #endif
 
-// Absolute reports arrive over 115200-baud UART much faster than the USB
-// interrupt endpoint can complete them.  Keep button edges FIFO ordered,
-// while replacing redundant same-button motion at the queue tail.
 #ifdef SIMPLE_KVM_AUDIO
-#define HID_REPORT_QUEUE_CAPACITY 32u
-#define HID_REPORT_MAX_BYTES 8u
-
-struct HidReportQueue {
-    uint8_t reports[HID_REPORT_QUEUE_CAPACITY][HID_REPORT_MAX_BYTES];
-    uint8_t head;
-    uint8_t count;
-};
-
-static HidReportQueue g_keyboard_queue{};
-static HidReportQueue g_mouse_queue{};
-
-static uint8_t hid_queue_index(const HidReportQueue *queue, uint8_t offset)
-{
-    return static_cast<uint8_t>(
-        (static_cast<uint16_t>(queue->head) + offset) %
-        HID_REPORT_QUEUE_CAPACITY
-    );
-}
-
-static void hid_queue_clear(HidReportQueue *queue)
-{
-    queue->head = 0U;
-    queue->count = 0U;
-}
-
-static bool hid_queue_push(HidReportQueue *queue, const uint8_t *report,
-                           uint8_t length, bool coalesce_same_buttons)
-{
-    if (report == nullptr || length > HID_REPORT_MAX_BYTES) return false;
-    if (queue->count > 0U && coalesce_same_buttons) {
-        const uint8_t tail = hid_queue_index(
-            queue, static_cast<uint8_t>(queue->count - 1U));
-        if (queue->reports[tail][0] == report[0]) {
-            memcpy(queue->reports[tail], report, length);
-            return true;
-        }
-    }
-    if (queue->count >= HID_REPORT_QUEUE_CAPACITY) return false;
-    const uint8_t slot = hid_queue_index(queue, queue->count);
-    memcpy(queue->reports[slot], report, length);
-    queue->count++;
-    return true;
-}
-
-static void hid_queue_pop(HidReportQueue *queue)
-{
-    if (queue->count == 0U) return;
-    queue->head = hid_queue_index(queue, 1U);
-    queue->count--;
-}
+static simple_kvm::HidReportQueue g_keyboard_queue{};
+static simple_kvm::HidReportQueue g_mouse_queue{};
 #endif
 
+// Absolute positions can coalesce while button edges remain FIFO ordered.
 #define ABS_MOUSE_QUEUE_CAPACITY 32u
 #define ABS_INPUT_TIMEOUT_MS 2500u
 static uint8_t g_abs_queue[ABS_MOUSE_QUEUE_CAPACITY][PKT_LEN_MOUSE_ABS];
@@ -413,43 +363,43 @@ static void abs_mouse_service(void)
 static void hid_keyboard_service(void)
 {
     if (hUSBD_Device_HID.dev_state != USBD_STATE_CONFIGURED) {
-        hid_queue_clear(&g_keyboard_queue);
+        g_keyboard_queue.clear();
         return;
     }
-    if (g_keyboard_queue.count == 0U ||
+    if (g_keyboard_queue.size() == 0U ||
         !HID_Composite_keyboard_isIdle()) {
         return;
     }
     const uint8_t status = USBD_HID_KEYBOARD_SendReport(
         &hUSBD_Device_HID,
-        g_keyboard_queue.reports[g_keyboard_queue.head],
+        g_keyboard_queue.front(),
         PKT_LEN_KEYBOARD
     );
     simple_kvm::audio::bp2::audio_receive_pipeline().note_hid_result(
         0U, status == USBD_BUSY, status != USBD_OK);
     if (status == USBD_OK) {
-        hid_queue_pop(&g_keyboard_queue);
+        g_keyboard_queue.pop();
     }
 }
 
 static void hid_mouse_service(void)
 {
     if (hUSBD_Device_HID.dev_state != USBD_STATE_CONFIGURED) {
-        hid_queue_clear(&g_mouse_queue);
+        g_mouse_queue.clear();
         return;
     }
-    if (g_mouse_queue.count == 0U || !HID_Composite_mouse_isIdle()) {
+    if (g_mouse_queue.size() == 0U || !HID_Composite_mouse_isIdle()) {
         return;
     }
     const uint8_t status = USBD_HID_MOUSE_SendReport(
         &hUSBD_Device_HID,
-        g_mouse_queue.reports[g_mouse_queue.head],
+        g_mouse_queue.front(),
         PKT_LEN_MOUSE
     );
     simple_kvm::audio::bp2::audio_receive_pipeline().note_hid_result(
         1U, status == USBD_BUSY, status != USBD_OK);
     if (status == USBD_OK) {
-        hid_queue_pop(&g_mouse_queue);
+        g_mouse_queue.pop();
     }
 }
 
@@ -467,7 +417,7 @@ static void hid_send_keyboard(const Packet *p)
     uint8_t report[PKT_LEN_KEYBOARD];
     memcpy(report, p->payload, PKT_LEN_KEYBOARD);
 #ifdef SIMPLE_KVM_AUDIO
-    if (!hid_queue_push(&g_keyboard_queue, report, PKT_LEN_KEYBOARD, false)) {
+    if (!g_keyboard_queue.push(report, PKT_LEN_KEYBOARD)) {
         g_err_count = 6;
         simple_kvm::audio::bp2::audio_receive_pipeline().note_hid_result(
             0U, false, true);
@@ -490,7 +440,7 @@ static void hid_send_mouse(const Packet *p)
     report[3] = static_cast<uint8_t>(rpt.wheel_v);
     report[4] = static_cast<uint8_t>(rpt.wheel_h);
 #ifdef SIMPLE_KVM_AUDIO
-    if (!hid_queue_push(&g_mouse_queue, report, sizeof(report), true)) {
+    if (!g_mouse_queue.push(report, sizeof(report))) {
         g_err_count = 6;
         simple_kvm::audio::bp2::audio_receive_pipeline().note_hid_result(
             1U, false, true);
@@ -516,8 +466,8 @@ void setup()
     Serial1.begin(115200UL);
     parser_init(&g_parser);
 #ifdef SIMPLE_KVM_AUDIO
-    hid_queue_clear(&g_keyboard_queue);
-    hid_queue_clear(&g_mouse_queue);
+    g_keyboard_queue.clear();
+    g_mouse_queue.clear();
 #endif
 
     IWatchdog.begin(4000000);
