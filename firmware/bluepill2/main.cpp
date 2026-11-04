@@ -440,7 +440,8 @@ static void hid_send_mouse(const Packet *p)
     report[3] = static_cast<uint8_t>(rpt.wheel_v);
     report[4] = static_cast<uint8_t>(rpt.wheel_h);
 #ifdef SIMPLE_KVM_AUDIO
-    if (!g_mouse_queue.push(report, sizeof(report))) {
+    const auto queue_result = g_mouse_queue.push_mouse(report, sizeof(report));
+    if (queue_result != simple_kvm::HidReportQueue::MousePushResult::kQueued) {
         g_err_count = 6;
         simple_kvm::audio::bp2::audio_receive_pipeline().note_hid_result(
             1U, false, true);

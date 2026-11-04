@@ -379,7 +379,8 @@ def test_audio_profile_queues_boot_hid_reports_while_audio_is_active():
         re.DOTALL,
     )
     assert keyboard and "g_keyboard_queue.push" in keyboard.group(1)
-    assert mouse and "g_mouse_queue.push" in mouse.group(1)
+    assert mouse and "g_mouse_queue.push_mouse" in mouse.group(1)
+    assert "MousePushResult::kQueued" in mouse.group(1)
     assert "USBD_HID_KEYBOARD_SendReport" not in keyboard.group(1)
     assert "USBD_HID_MOUSE_SendReport" not in mouse.group(1)
 
