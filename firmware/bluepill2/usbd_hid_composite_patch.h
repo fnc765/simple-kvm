@@ -5,7 +5,7 @@
   *
   * Changes from original usbd_hid_composite.h:
   *   - Interface order swapped: Keyboard=0x00, Mouse=0x01
-  *   - HID_MOUSE_REPORT_DESC_SIZE: 74→76 (5-byte mouse report)
+  *   - HID_MOUSE_REPORT_DESC_SIZE: 74→78 (5-byte mouse report; last byte reserved)
   *   - HID_KEYBOARD_REPORT_DESC_SIZE: 45→61 (Boot Keyboard with LED output)
   *   - #ifndef guards for HID_MOUSE_EPIN_SIZE and HID_FS_BINTERVAL
   *
@@ -71,8 +71,8 @@ extern "C" {
  *          (each HID interface block = 9 + 9 + 7 = 25 bytes) */
 #define USB_COMPOSITE_HID_CONFIG_DESC_SIZ       84U
 #define USB_HID_DESC_SIZ              9U
-/* PATCHED: 5-byte mouse report (buttons + X + Y + wheel_v + wheel_h) */
-#define HID_MOUSE_REPORT_DESC_SIZE    76U
+/* PATCHED: 5-byte mouse report (buttons + X + Y + wheel_v + reserved byte) */
+#define HID_MOUSE_REPORT_DESC_SIZE    78U
 /* PATCHED: Boot Keyboard with LED output (67 bytes) */
 #define HID_KEYBOARD_REPORT_DESC_SIZE 67U
 /* Absolute Mouse report descriptor: Generic Desktop Mouse with 3 buttons

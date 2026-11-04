@@ -364,7 +364,9 @@ def test_main_cpp_queues_absolute_reports_instead_of_dropping_usb_busy():
 
 def test_audio_profile_queues_boot_hid_reports_while_audio_is_active():
     text = _read("main.cpp")
-    assert "HID_REPORT_QUEUE_CAPACITY" in text
+    assert '#include "../common/hid_report_queue.h"' in text
+    assert "simple_kvm::HidReportQueue g_keyboard_queue" in text
+    assert "simple_kvm::HidReportQueue g_mouse_queue" in text
     assert "hid_queued_service" in text
     keyboard = re.search(
         r"static\s+void\s+hid_send_keyboard\s*\([^)]*\)\s*\{(.+?)\n\}",
@@ -376,8 +378,9 @@ def test_audio_profile_queues_boot_hid_reports_while_audio_is_active():
         text,
         re.DOTALL,
     )
-    assert keyboard and "hid_queue_push" in keyboard.group(1)
-    assert mouse and "hid_queue_push" in mouse.group(1)
+    assert keyboard and "g_keyboard_queue.push" in keyboard.group(1)
+    assert mouse and "g_mouse_queue.push_mouse" in mouse.group(1)
+    assert "MousePushResult::kQueued" in mouse.group(1)
     assert "USBD_HID_KEYBOARD_SendReport" not in keyboard.group(1)
     assert "USBD_HID_MOUSE_SendReport" not in mouse.group(1)
 

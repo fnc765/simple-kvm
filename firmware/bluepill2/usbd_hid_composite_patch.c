@@ -5,7 +5,7 @@
   *
   * Changes from original usbd_hid_composite.c:
   *   (a) Config descriptor interface order: Keyboard→Mouse (not Mouse→Keyboard)
-  *   (b) Mouse report descriptor: expanded to 76 bytes (5-byte report with wheel_h)
+  *   (b) Mouse report descriptor: 78 bytes (5-byte report; last byte reserved)
   *   (c) Keyboard report descriptor: expanded to 61 bytes (Boot Keyboard + LED output)
   *
   * Original source:
@@ -534,9 +534,10 @@ __ALIGN_BEGIN static uint8_t USBD_HID_DeviceQualifierDesc[USB_LEN_DEV_QUALIFIER_
 #endif /* USE_USBD_COMPOSITE  */
 
 /*
- * PATCHED: 5-byte mouse report descriptor (76 bytes)
- * Added horizontal wheel axis for full 5-byte report support.
- * Report format: [button:1][X:1][Y:1][wheel_v:1][wheel_h:1]
+ * PATCHED: 5-byte mouse report descriptor (78 bytes).
+ * Exactly one vertical Wheel usage.  Keep the unsupported horizontal byte
+ * as constant padding so the existing UART and USB report lengths stay stable.
+ * Report format: [button:1][X:1][Y:1][wheel_v:1][reserved:1]
  */
 __ALIGN_BEGIN static uint8_t HID_MOUSE_ReportDesc[HID_MOUSE_REPORT_DESC_SIZE] __ALIGN_END = {
   0x05, 0x01,        /* Usage Page (Generic Desktop Ctrls)     */
@@ -559,12 +560,13 @@ __ALIGN_BEGIN static uint8_t HID_MOUSE_ReportDesc[HID_MOUSE_REPORT_DESC_SIZE] __
   0x09, 0x30,        /*     Usage (X)                          */
   0x09, 0x31,        /*     Usage (Y)                          */
   0x09, 0x38,        /*     Usage (Wheel)                      */
-  0x09, 0x38,        /*     Usage (Wheel) - horizontal scroll  */
   0x15, 0x81,        /*     Logical Minimum (-127)             */
   0x25, 0x7F,        /*     Logical Maximum (127)              */
   0x75, 0x08,        /*     Report Size (8)                    */
-  0x95, 0x04,        /*     Report Count (4) - X,Y,WheelV,WheelH */
+  0x95, 0x03,        /*     Report Count (3) - X,Y,Wheel       */
   0x81, 0x06,        /*     Input (Data,Var,Rel)               */
+  0x95, 0x01,        /*     Report Count (1) - reserved byte   */
+  0x81, 0x01,        /*     Input (Const,Array,Abs)            */
   0xC0,              /*   End Collection                       */
   0x09, 0x3C,        /*   Usage (Motion Wakeup)                */
   0x05, 0xFF,        /*   Usage Page (Reserved 0xFF)           */

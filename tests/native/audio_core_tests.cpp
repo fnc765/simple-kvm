@@ -10,6 +10,7 @@
 #include "audio_pipeline.h"
 #include "audio_ring.h"
 #include "audio_session.h"
+#include "hid_report_queue.h"
 
 using namespace simple_kvm::audio;
 
@@ -438,11 +439,310 @@ static int test_accelerated_drift()
   return 0;
 }
 
+static int test_hid_report_queue()
+{
+  simple_kvm::HidReportQueue queue;
+  const uint8_t wheel_up[5] = {0, 0, 0, 1, 0};
+  CHECK(queue.front() == nullptr);
+  queue.pop();
+
+  // Repeated ticks with identical button state must not replace one another.
+  for (unsigned i = 0; i < 3U; ++i) {
+    CHECK(queue.push(wheel_up, sizeof(wheel_up)));
+  }
+  CHECK(queue.size() == 3U);
+  for (unsigned i = 0; i < 3U; ++i) {
+    CHECK(queue.front() != nullptr);
+    CHECK(std::memcmp(queue.front(), wheel_up, sizeof(wheel_up)) == 0);
+    queue.pop();
+  }
+  CHECK(queue.size() == 0U);
+
+  // Wheel/motion/direction changes and button edges keep their original order.
+  const std::array<std::array<uint8_t, 5>, 6> reports{{
+      {{0, 0, 0, 1, 0}}, {{0, 5, 0, 0, 0}}, {{0, 0, 0, 0xFF, 0}},
+      {{1, 0, 0, 0, 0}}, {{1, 0, 0, 2, 0}}, {{0, 0, 0, 0, 0}},
+  }};
+  for (const auto &report : reports) {
+    CHECK(queue.push(report.data(), static_cast<uint8_t>(report.size())));
+  }
+  for (const auto &report : reports) {
+    CHECK(queue.front() != nullptr);
+    CHECK(std::memcmp(queue.front(), report.data(), report.size()) == 0);
+    queue.pop();
+  }
+
+  // A full queue refuses new input without corrupting already admitted ticks.
+  // Drain/refill half of it to also exercise ring wraparound.
+  for (uint8_t i = 0; i < queue.kCapacity; ++i) {
+    const uint8_t report[5] = {0, 0, 0, i, 0};
+    CHECK(queue.push(report, sizeof(report)));
+  }
+  CHECK(!queue.push(wheel_up, sizeof(wheel_up)));
+  for (uint8_t i = 0; i < queue.kCapacity / 2U; ++i) {
+    CHECK(queue.front()[3] == i);
+    queue.pop();
+  }
+  for (uint8_t i = queue.kCapacity; i < queue.kCapacity * 3U / 2U; ++i) {
+    const uint8_t report[5] = {0, 0, 0, i, 0};
+    CHECK(queue.push(report, sizeof(report)));
+  }
+  for (uint8_t i = queue.kCapacity / 2U; i < queue.kCapacity * 3U / 2U; ++i) {
+    CHECK(queue.front()[3] == i);
+    queue.pop();
+  }
+  CHECK(queue.front() == nullptr);
+
+  // Keyboard reports share this FIFO; invalid sizes must leave it unchanged.
+  const uint8_t keyboard[8] = {0, 0, 4, 0, 0, 0, 0, 0};
+  const uint8_t oversized[9] = {};
+  CHECK(queue.push(keyboard, sizeof(keyboard)));
+  CHECK(!queue.push(nullptr, 5U));
+  CHECK(!queue.push(wheel_up, 0U));
+  CHECK(!queue.push(oversized, sizeof(oversized)));
+  CHECK(queue.size() == 1U);
+  CHECK(std::memcmp(queue.front(), keyboard, sizeof(keyboard)) == 0);
+  queue.clear();
+  CHECK(queue.front() == nullptr);
+  CHECK(queue.size() == 0U);
+  CHECK(queue.push(wheel_up, sizeof(wheel_up)));
+  CHECK(std::memcmp(queue.front(), wheel_up, sizeof(wheel_up)) == 0);
+  return 0;
+}
+
+using MousePushResult = simple_kvm::HidReportQueue::MousePushResult;
+
+struct MouseDelivered {
+  int32_t x = 0;
+  int32_t y = 0;
+  int32_t wheel = 0;
+  int32_t wheel_h = 0;
+  uint8_t buttons = 0U;
+};
+
+static void deliver_mouse(simple_kvm::HidReportQueue &queue,
+                          MouseDelivered &delivered)
+{
+  const uint8_t *report = queue.front();
+  if (report == nullptr) return;
+  delivered.buttons = report[0];
+  delivered.x += static_cast<int8_t>(report[1]);
+  delivered.y += static_cast<int8_t>(report[2]);
+  delivered.wheel += static_cast<int8_t>(report[3]);
+  delivered.wheel_h += static_cast<int8_t>(report[4]);
+  queue.pop();
+}
+
+static int test_mouse_queue_delta_and_wheel_order()
+{
+  simple_kvm::HidReportQueue queue;
+  const uint8_t first[5] = {1, 2, 0xFD, 1, 1};
+  const uint8_t second[5] = {1, 4, 0xFB, 2, 2};
+  const uint8_t reverse[5] = {1, 0, 0, 0xFF, 0xFF};
+  const uint8_t released[5] = {0, 0, 0, 0, 0};
+  CHECK(queue.push_mouse(first, 5U) == MousePushResult::kQueued);
+  CHECK(queue.push_mouse(second, 5U) == MousePushResult::kQueued);
+  CHECK(queue.push_mouse(reverse, 5U) == MousePushResult::kQueued);
+  CHECK(queue.push_mouse(released, 5U) == MousePushResult::kQueued);
+  CHECK(queue.front()[0] == 1U && queue.front()[3] == 3U);
+  MouseDelivered delivered;
+  deliver_mouse(queue, delivered);
+  CHECK(delivered.x == 6 && delivered.y == -8 && delivered.wheel == 3);
+  CHECK(queue.front()[0] == 1U && queue.front()[3] == 0xFFU);
+  deliver_mouse(queue, delivered);
+  CHECK(queue.front()[0] == 0U);
+  deliver_mouse(queue, delivered);
+  CHECK(delivered.buttons == 0U && delivered.wheel == 2);
+  CHECK(delivered.wheel_h == 2);
+  CHECK(queue.front() == nullptr);
+
+  // Signed sums that do not fit one report must remain separate, not clamp.
+  for (const int16_t sign : std::array<int16_t, 2>{{-1, 1}}) {
+    queue.clear();
+    const uint8_t large[5] = {0, static_cast<uint8_t>(127 * sign), 0,
+                              static_cast<uint8_t>(127 * sign), 0};
+    const uint8_t small[5] = {0, static_cast<uint8_t>(sign), 0,
+                              static_cast<uint8_t>(sign), 0};
+    CHECK(queue.push_mouse(large, 5U) == MousePushResult::kQueued);
+    CHECK(queue.push_mouse(small, 5U) == MousePushResult::kQueued);
+    MouseDelivered sum;
+    while (queue.front() != nullptr) deliver_mouse(queue, sum);
+    CHECK(sum.x == 128 * sign && sum.wheel == 128 * sign);
+  }
+  return 0;
+}
+
+static int test_mouse_queue_high_rate_release()
+{
+  // Model the reviewed regression: 1000 UART reports/s, 8ms USB interval.
+  // Also exceed the maximum USB delta throughput to force FIFO overflow.
+  for (const uint8_t delta : std::array<uint8_t, 2>{{1U, 127U}}) {
+    simple_kvm::HidReportQueue queue;
+    MouseDelivered delivered;
+    const uint8_t pressed[5] = {1, 0, 0, 0, 0};
+    const uint8_t motion[5] = {1, delta, 0, 0, 0};
+    const uint8_t released[5] = {0, 0, 0, 0, 0};
+    CHECK(queue.push_mouse(pressed, 5U) == MousePushResult::kQueued);
+    deliver_mouse(queue, delivered);
+    int32_t admitted_x = 0;
+    unsigned dropped = 0U;
+    for (unsigned ms = 1U; ms < 2000U; ++ms) {
+      const auto result = queue.push_mouse(motion, 5U);
+      CHECK(result != MousePushResult::kStateOnly);
+      if (result == MousePushResult::kQueued) admitted_x += delta;
+      else ++dropped;
+      if (ms % 8U == 0U) deliver_mouse(queue, delivered);
+    }
+    CHECK(queue.push_mouse(released, 5U) == MousePushResult::kQueued);
+    CHECK(queue.size() <= queue.kCapacity + 1U);
+    while (queue.front() != nullptr) deliver_mouse(queue, delivered);
+    CHECK(delivered.buttons == 0U);
+    CHECK(delivered.x == admitted_x);
+    CHECK(delta == 1U ? dropped == 0U : dropped > 0U);
+    CHECK(delta != 1U || delivered.x == 1999);
+    std::printf("MOUSE_QUEUE_RATE_PASS delta=%u final_buttons=%u\n",
+                static_cast<unsigned>(delta),
+                static_cast<unsigned>(delivered.buttons));
+  }
+  return 0;
+}
+
+static int test_mouse_queue_reserved_state_and_order()
+{
+  const uint8_t pressed[5] = {1, 0, 0, 0, 0};
+  const uint8_t released[5] = {0, 0, 0, 0, 0};
+  // Full queues of ordered wheel events must retain every admitted tick.
+  // Test both a single release and overflow of the reserved control slot.
+  for (const bool spam : {false, true}) {
+    simple_kvm::HidReportQueue queue;
+    CHECK(queue.push_mouse(pressed, 5U) == MousePushResult::kQueued);
+    queue.pop();
+    for (uint8_t i = 0U; i < queue.kCapacity; ++i) {
+      const uint8_t wheel[5] = {1, 0, 0,
+          static_cast<uint8_t>(i % 2U == 0U ? 1 : -1), 0};
+      CHECK(queue.push_mouse(wheel, 5U) == MousePushResult::kQueued);
+    }
+    CHECK(queue.size() == queue.kCapacity);
+    CHECK(queue.push_mouse(nullptr, 5U) == MousePushResult::kDropped);
+    CHECK(queue.push_mouse(released, 4U) == MousePushResult::kDropped);
+    CHECK(queue.push_mouse(released, 5U) == MousePushResult::kQueued);
+    const uint8_t after_release[5] = {0, 7, 0, 1, 0};
+    CHECK(queue.push_mouse(after_release, 5U) == MousePushResult::kDropped);
+    if (spam) {
+      CHECK(queue.push_mouse(pressed, 5U) == MousePushResult::kStateOnly);
+      CHECK(queue.push_mouse(released, 5U) == MousePushResult::kStateOnly);
+    }
+    CHECK(queue.size() == queue.kCapacity + 1U);
+    for (uint8_t i = 0U; i < queue.kCapacity; ++i) {
+      CHECK(queue.front()[0] == 1U);
+      CHECK(static_cast<int8_t>(queue.front()[3]) == (i % 2U == 0U ? 1 : -1));
+      queue.pop();
+    }
+    CHECK(queue.front()[0] == 0U);
+    for (unsigned axis = 1U; axis < 5U; ++axis) CHECK(queue.front()[axis] == 0U);
+    queue.pop();
+    CHECK(queue.front() == nullptr && queue.size() == 0U);
+  }
+
+  // New input cannot overtake a deferred release once a FIFO slot is freed.
+  simple_kvm::HidReportQueue queue;
+  CHECK(queue.push_mouse(pressed, 5U) == MousePushResult::kQueued);
+  queue.pop();
+  for (uint8_t i = 0U; i < queue.kCapacity; ++i) {
+    const uint8_t wheel[5] = {1, 0, 0,
+        static_cast<uint8_t>(i % 2U == 0U ? 1 : -1), 0};
+    CHECK(queue.push_mouse(wheel, 5U) == MousePushResult::kQueued);
+  }
+  CHECK(queue.push_mouse(released, 5U) == MousePushResult::kQueued);
+  queue.pop();
+  const uint8_t motion[5] = {0, 5, 0, 0, 0};
+  CHECK(queue.push_mouse(motion, 5U) == MousePushResult::kQueued);
+  CHECK(queue.push_mouse(pressed, 5U) == MousePushResult::kQueued);
+  for (unsigned i = 1U; i < queue.kCapacity; ++i) {
+    CHECK(queue.front()[0] == 1U);
+    queue.pop();
+  }
+  CHECK(queue.front()[0] == 0U && queue.front()[1] == 5U);
+  queue.pop();
+  CHECK(queue.front()[0] == 1U);
+  queue.clear();
+  CHECK(queue.front() == nullptr && queue.size() == 0U);
+  CHECK(queue.push_mouse(pressed, 5U) == MousePushResult::kQueued);
+  CHECK(queue.front()[0] == 1U);
+  return 0;
+}
+
+static int test_mouse_queue_overflow_data_diagnostics()
+{
+  simple_kvm::HidReportQueue queue;
+  for (uint8_t i = 0U; i < queue.kCapacity; ++i) {
+    const uint8_t wheel[5] = {1, 0, 0,
+        static_cast<uint8_t>(i % 2U == 0U ? 1 : -1), 0};
+    CHECK(queue.push_mouse(wheel, 5U) == MousePushResult::kQueued);
+  }
+  const uint8_t release_with_data[5] = {0, 9, 8, 7, 6};
+  CHECK(queue.push_mouse(release_with_data, 5U) == MousePushResult::kStateOnly);
+  for (uint8_t i = 0U; i < queue.kCapacity; ++i) queue.pop();
+  CHECK(queue.front()[0] == 0U);
+  for (unsigned axis = 1U; axis < 5U; ++axis) CHECK(queue.front()[axis] == 0U);
+  queue.pop();
+  CHECK(queue.push_mouse(release_with_data, 5U) == MousePushResult::kQueued);
+  CHECK(std::memcmp(queue.front(), release_with_data, 5U) == 0);
+  return 0;
+}
+
+static int test_mouse_queue_mixed_overload_accounting()
+{
+  simple_kvm::HidReportQueue queue;
+  MouseDelivered delivered;
+  int32_t admitted[4] = {};
+  uint32_t random = 0x51C0FFEEU;
+  uint8_t buttons = 0U;
+  unsigned state_only = 0U;
+  for (unsigned i = 0U; i < 5000U; ++i) {
+    random ^= random << 13U;
+    random ^= random >> 17U;
+    random ^= random << 5U;
+    if (i % 3U == 0U) buttons = static_cast<uint8_t>((random >> 8U) & 7U);
+    const uint8_t report[5] = {
+        buttons,
+        static_cast<uint8_t>(static_cast<int>((random >> 16U) % 15U) - 7),
+        static_cast<uint8_t>(static_cast<int>((random >> 24U) % 15U) - 7),
+        static_cast<uint8_t>(i % 11U == 0U ? ((random & 1U) ? 1 : -1) : 0),
+        static_cast<uint8_t>(i % 13U == 0U ? ((random & 2U) ? 1 : -1) : 0),
+    };
+    const auto result = queue.push_mouse(report, 5U);
+    if (result == MousePushResult::kQueued) {
+      for (unsigned axis = 0U; axis < 4U; ++axis) {
+        admitted[axis] += static_cast<int8_t>(report[axis + 1U]);
+      }
+    } else if (result == MousePushResult::kStateOnly) {
+      ++state_only;
+    }
+    CHECK(queue.size() <= queue.kCapacity + 1U);
+    if (random % 8U == 0U) deliver_mouse(queue, delivered);
+  }
+  const uint8_t released[5] = {0, 0, 0, 0, 0};
+  queue.push_mouse(released, 5U);
+  while (queue.front() != nullptr) deliver_mouse(queue, delivered);
+  CHECK(state_only > 0U);
+  CHECK(delivered.buttons == 0U);
+  CHECK(delivered.x == admitted[0] && delivered.y == admitted[1]);
+  CHECK(delivered.wheel == admitted[2] && delivered.wheel_h == admitted[3]);
+  return 0;
+}
+
 int main()
 {
   if (test_crc_and_frame() != 0 || test_sequence_and_session() != 0 ||
       test_boot_barrier_and_sync_retry() != 0 ||
       test_receive_pipeline() != 0 ||
+      test_hid_report_queue() != 0 ||
+      test_mouse_queue_delta_and_wheel_order() != 0 ||
+      test_mouse_queue_high_rate_release() != 0 ||
+      test_mouse_queue_reserved_state_and_order() != 0 ||
+      test_mouse_queue_overflow_data_diagnostics() != 0 ||
+      test_mouse_queue_mixed_overload_accounting() != 0 ||
       test_ring() != 0 || test_asrc_vectors() != 0 ||
       test_accelerated_drift() != 0) {
     return 1;
