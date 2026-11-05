@@ -34,6 +34,7 @@ def capture_pcm16(
     duration_s: float,
     *,
     exclusive: bool = True,
+    raw: bool = True,
     on_armed: Callable[[dict[str, object]], None] | None = None,
     wait_until: Callable[[], bool] | None = None,
     arm_timeout_s: float = 20.0,
@@ -43,28 +44,10 @@ def capture_pcm16(
     """Capture BP2 as mono PCM16 and return bytes plus inspectable metadata."""
 
     client = audio.activate_client(endpoint_id)
-    capture_mix = not exclusive
-    fmt = (
-        audio.WAVEFORMATEX(1, 1, 48000, 96000, 2, 16, 0)
-        if exclusive
-        else audio.get_mix_format(client)
+    fmt = audio.initialize_audio_client(
+        client, exclusive=exclusive, use_mix=True, raw=raw,
     )
-    flags = 0 if exclusive else (
-        audio.AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | audio.AUDCLNT_STREAMFLAGS_RAW
-    )
-    share_mode = (
-        audio.AUDCLNT_SHAREMODE_EXCLUSIVE
-        if exclusive
-        else audio.AUDCLNT_SHAREMODE_SHARED
-    )
-    client.Initialize(
-        share_mode,
-        flags,
-        1_000_000 if exclusive else 10_000_000,
-        1_000_000 if exclusive else 0,
-        byref(fmt),
-        None,
-    )
+    capture_mix = int(fmt.wFormatTag) == 3
     capture = audio.get_service(
         client,
         GUID("{C8ADBD64-E71E-48A0-A4DE-185C395CD317}"),
@@ -73,6 +56,7 @@ def capture_pcm16(
     metadata: dict[str, object] = {
         "endpoint_id": endpoint_id,
         "exclusive": exclusive,
+        "raw": bool(raw and not exclusive),
         "format": audio.format_desc(fmt),
         "silent_packets": 0,
         "packets": 0,

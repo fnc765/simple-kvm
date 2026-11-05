@@ -25,10 +25,22 @@ if (-not $vsInstall) {
 
 $vcvars = Join-Path $vsInstall "VC\Auxiliary\Build\vcvars64.bat"
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+& python (Join-Path $repoRoot "tools\audio_test\extract_spi_poll_fixture.py") `
+    (Join-Path $OutputDir "bp2_spi_poll_fixture.h")
+if ($LASTEXITCODE -ne 0) {
+    throw "AUDIO_FAIL stage=spi_poll_extraction"
+}
+& python (Join-Path $repoRoot "tools\audio_test\extract_hid_fixture.py") `
+    (Join-Path $OutputDir "bp2_hid_fixture.h")
+if ($LASTEXITCODE -ne 0) {
+    throw "AUDIO_FAIL stage=hid_extraction"
+}
 $exe = Join-Path $OutputDir "audio_core_tests.exe"
 $include = Join-Path $repoRoot "firmware\common"
 $sources = @(
     (Join-Path $repoRoot "tests\native\audio_core_tests.cpp"),
+    (Join-Path $repoRoot "tests\native\bp2_spi_poll_tests.cpp"),
+    (Join-Path $repoRoot "tests\native\bp2_hid_tests.cpp"),
     (Join-Path $repoRoot "firmware\common\audio_frame.cpp"),
     (Join-Path $repoRoot "firmware\common\audio_ring.cpp"),
     (Join-Path $repoRoot "firmware\common\audio_asrc.cpp"),
@@ -37,8 +49,8 @@ $sources = @(
     (Join-Path $repoRoot "firmware\common\audio_pipeline.cpp")
 )
 $quotedSources = ($sources | ForEach-Object { '"' + $_ + '"' }) -join " "
-$compile = 'call "{0}" >nul && cl /nologo /std:c++17 /EHsc /O2 /W4 /WX /I"{1}" /Fe:"{2}" {3}' -f `
-    $vcvars, $include, $exe, $quotedSources
+$compile = 'call "{0}" >nul && cl /nologo /std:c++17 /utf-8 /EHsc /O2 /W4 /WX /I"{1}" /I"{4}" /Fe:"{2}" {3}' -f `
+    $vcvars, $include, $exe, $quotedSources, $OutputDir
 
 Push-Location $OutputDir
 try {

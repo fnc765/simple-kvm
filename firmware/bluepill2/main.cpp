@@ -14,8 +14,8 @@
 #include "../common/packet_parser.h"
 #include "../common/build_info.h"
 #include "hid_handler.h"
-#ifdef SIMPLE_KVM_AUDIO
 #include "../common/hid_report_queue.h"
+#ifdef SIMPLE_KVM_AUDIO
 #include "audio_spi_slave.h"
 #include "audio_usb_mic.h"
 #endif
@@ -260,20 +260,20 @@ static bool handle_audio_control(const Packet *packet)
 }
 #endif
 
-#ifdef SIMPLE_KVM_AUDIO
+// BEGIN native-tested HID forwarding
 static simple_kvm::HidReportQueue g_keyboard_queue{};
 static simple_kvm::HidReportQueue g_mouse_queue{};
-#endif
 
 // Absolute positions can coalesce while button edges remain FIFO ordered.
 #define ABS_MOUSE_QUEUE_CAPACITY 32u
-#define ABS_INPUT_TIMEOUT_MS 2500u
+#define HID_INPUT_TIMEOUT_MS 2500u
 static uint8_t g_abs_queue[ABS_MOUSE_QUEUE_CAPACITY][PKT_LEN_MOUSE_ABS];
 static uint8_t g_abs_head = 0;
 static uint8_t g_abs_count = 0;
 static bool g_abs_head_inflight = false;
-static uint8_t g_abs_last_desired[PKT_LEN_MOUSE_ABS] = {0, 0, 0, 0, 0};
+static uint8_t g_abs_last_sent[PKT_LEN_MOUSE_ABS] = {0, 0, 0, 0, 0};
 static uint32_t g_last_uart_activity_ms = 0;
+static bool g_input_timed_out = false;
 
 static uint8_t abs_queue_index(uint8_t offset)
 {
@@ -285,7 +285,7 @@ static void abs_queue_clear(void)
     g_abs_head = 0;
     g_abs_count = 0;
     g_abs_head_inflight = false;
-    memset(g_abs_last_desired, 0, sizeof(g_abs_last_desired));
+    memset(g_abs_last_sent, 0, sizeof(g_abs_last_sent));
 }
 
 static void abs_queue_pop_head(void)
@@ -297,8 +297,6 @@ static void abs_queue_pop_head(void)
 
 static void abs_queue_report(const uint8_t *report)
 {
-    memcpy(g_abs_last_desired, report, PKT_LEN_MOUSE_ABS);
-
     if (g_abs_count > 0) {
         const uint8_t tail_offset = static_cast<uint8_t>(g_abs_count - 1);
         const uint8_t tail = abs_queue_index(tail_offset);
@@ -355,11 +353,11 @@ static void abs_mouse_service(void)
         2U, status == USBD_BUSY, status != USBD_OK);
 #endif
     if (status == USBD_OK) {
+        memcpy(g_abs_last_sent, g_abs_queue[g_abs_head], PKT_LEN_MOUSE_ABS);
         g_abs_head_inflight = true;
     }
 }
 
-#ifdef SIMPLE_KVM_AUDIO
 static void hid_keyboard_service(void)
 {
     if (hUSBD_Device_HID.dev_state != USBD_STATE_CONFIGURED) {
@@ -375,8 +373,10 @@ static void hid_keyboard_service(void)
         g_keyboard_queue.front(),
         PKT_LEN_KEYBOARD
     );
+#ifdef SIMPLE_KVM_AUDIO
     simple_kvm::audio::bp2::audio_receive_pipeline().note_hid_result(
         0U, status == USBD_BUSY, status != USBD_OK);
+#endif
     if (status == USBD_OK) {
         g_keyboard_queue.pop();
     }
@@ -396,8 +396,10 @@ static void hid_mouse_service(void)
         g_mouse_queue.front(),
         PKT_LEN_MOUSE
     );
+#ifdef SIMPLE_KVM_AUDIO
     simple_kvm::audio::bp2::audio_receive_pipeline().note_hid_result(
         1U, status == USBD_BUSY, status != USBD_OK);
+#endif
     if (status == USBD_OK) {
         g_mouse_queue.pop();
     }
@@ -408,7 +410,6 @@ static void hid_queued_service(void)
     hid_keyboard_service();
     hid_mouse_service();
 }
-#endif
 
 static void hid_send_keyboard(const Packet *p)
 {
@@ -416,15 +417,13 @@ static void hid_send_keyboard(const Packet *p)
     if (!validate_keyboard_report(p->payload, p->len)) { g_err_count = 6; return; }
     uint8_t report[PKT_LEN_KEYBOARD];
     memcpy(report, p->payload, PKT_LEN_KEYBOARD);
-#ifdef SIMPLE_KVM_AUDIO
     if (!g_keyboard_queue.push(report, PKT_LEN_KEYBOARD)) {
         g_err_count = 6;
+#ifdef SIMPLE_KVM_AUDIO
         simple_kvm::audio::bp2::audio_receive_pipeline().note_hid_result(
             0U, false, true);
-    }
-#else
-    HID_Composite_keyboard_sendReport(report, PKT_LEN_KEYBOARD);
 #endif
+    }
 }
 
 static void hid_send_mouse(const Packet *p)
@@ -439,16 +438,14 @@ static void hid_send_mouse(const Packet *p)
     report[2] = static_cast<uint8_t>(rpt.dy);
     report[3] = static_cast<uint8_t>(rpt.wheel_v);
     report[4] = static_cast<uint8_t>(rpt.wheel_h);
-#ifdef SIMPLE_KVM_AUDIO
     const auto queue_result = g_mouse_queue.push_mouse(report, sizeof(report));
     if (queue_result != simple_kvm::HidReportQueue::MousePushResult::kQueued) {
         g_err_count = 6;
+#ifdef SIMPLE_KVM_AUDIO
         simple_kvm::audio::bp2::audio_receive_pipeline().note_hid_result(
             1U, false, true);
-    }
-#else
-    HID_Composite_mouse_sendReport(report, sizeof(report));
 #endif
+    }
 }
 
 static void hid_send_mouse_abs(const Packet *p)
@@ -457,8 +454,49 @@ static void hid_send_mouse_abs(const Packet *p)
     if (!validate_mouse_abs_report(p->payload, p->len)) { g_err_count = 6; return; }
     // Payload is [buttons, x_lo, x_hi, y_lo, y_hi] - little-endian.
     // Queue it so USBD_BUSY never silently discards a button transition.
-    abs_queue_report(p->payload);
+    uint8_t report[PKT_LEN_MOUSE_ABS];
+    memcpy(report, p->payload, sizeof(report));
+    // Some Windows HID stacks treat an all-zero position as stationary.
+    // One logical X unit still maps to the leftmost pixel on normal desktops,
+    // while allowing a wire-level (0, 0) move/click to reach the screen origin.
+    if ((report[1] | report[2] | report[3] | report[4]) == 0U) {
+        report[1] = 1U;
+    }
+    abs_queue_report(report);
 }
+
+static void hid_note_uart_activity(uint32_t now_ms)
+{
+    g_last_uart_activity_ms = now_ms;
+    g_input_timed_out = false;
+}
+
+static void hid_input_timeout_service(uint32_t now_ms)
+{
+    if (g_input_timed_out ||
+        static_cast<uint32_t>(now_ms - g_last_uart_activity_ms)
+            <= HID_INPUT_TIMEOUT_MS) return;
+
+    // Drop queued history before releasing every interface. Keep an absolute
+    // report already in flight intact; its release follows it when USB is idle.
+    // The same retry queues serve legacy and audio builds, so BUSY cannot lose
+    // a timeout release. Fresh input is ordered after these neutral reports.
+    g_input_timed_out = true;
+    g_keyboard_queue.clear();
+    g_mouse_queue.clear();
+    const uint8_t keyboard_release[PKT_LEN_KEYBOARD] = {};
+    const uint8_t mouse_release[PKT_LEN_MOUSE] = {};
+    (void)g_keyboard_queue.push(keyboard_release, sizeof(keyboard_release));
+    (void)g_mouse_queue.push_mouse(mouse_release, sizeof(mouse_release));
+    uint8_t absolute_release[PKT_LEN_MOUSE_ABS];
+    memcpy(absolute_release, g_abs_last_sent, sizeof(absolute_release));
+    absolute_release[0] = 0U;
+    g_abs_count = g_abs_head_inflight ? 1U : 0U;
+    // Releasing a previously idle absolute interface would move a pointer
+    // that has since been controlled through the relative interface.
+    if (g_abs_last_sent[0] != 0U) abs_queue_report(absolute_release);
+}
+// END native-tested HID forwarding
 
 void setup()
 {
@@ -466,10 +504,8 @@ void setup()
     digitalWrite(LED_PIN, HIGH);
     Serial1.begin(115200UL);
     parser_init(&g_parser);
-#ifdef SIMPLE_KVM_AUDIO
     g_keyboard_queue.clear();
     g_mouse_queue.clear();
-#endif
 
     IWatchdog.begin(4000000);
     HID_Composite_Init(HID_KEYBOARD);
@@ -478,7 +514,7 @@ void setup()
         detect_reset_reason(RCC->CSR));
     (void)simple_kvm::audio::bp2::audio_spi_slave_begin();
 #endif
-    g_last_uart_activity_ms = millis();
+    hid_note_uart_activity(millis());
     IWatchdog.reload();
     for (int i = 0; i < 30; i++) { IWatchdog.reload(); delay(100); }
 }
@@ -499,7 +535,7 @@ void loop()
     while (Serial1.available()) {
         uint8_t b = static_cast<uint8_t>(Serial1.read());
         if (parser_feed(&g_parser, b, &g_pkt)) {
-            g_last_uart_activity_ms = millis();
+            hid_note_uart_activity(millis());
 #ifdef SIMPLE_KVM_AUDIO
             if (handle_audio_control(&g_pkt)) {
                 continue;
@@ -516,9 +552,7 @@ void loop()
                 default: g_err_count = 6; break;
             }
             abs_mouse_service();
-#ifdef SIMPLE_KVM_AUDIO
             hid_queued_service();
-#endif
         }
     }
 #ifdef SIMPLE_KVM_AUDIO
@@ -531,22 +565,7 @@ void loop()
     bp2_audio_mic_service();
 #endif
 
-    // Heartbeats arrive once per second while the app is healthy.  If UART
-    // disappears during a drag, release every absolute button at the last
-    // known coordinate instead of leaving the target permanently held.
-    if (
-        g_abs_last_desired[0] != 0
-        && static_cast<uint32_t>(millis() - g_last_uart_activity_ms)
-            > ABS_INPUT_TIMEOUT_MS
-    ) {
-        uint8_t release_report[PKT_LEN_MOUSE_ABS];
-        memcpy(release_report, g_abs_last_desired, PKT_LEN_MOUSE_ABS);
-        release_report[0] = 0;
-        abs_queue_report(release_report);
-        g_last_uart_activity_ms = millis();
-    }
+    hid_input_timeout_service(millis());
     abs_mouse_service();
-#ifdef SIMPLE_KVM_AUDIO
     hid_queued_service();
-#endif
 }

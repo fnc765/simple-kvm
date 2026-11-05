@@ -104,6 +104,43 @@ def test_continuous_gate_checks_silence_after_first_test_body():
     assert continuous_zero_run_count(capture) == (1, 92)
 
 
+def test_marker_revision_preserves_original_reference_and_qualification_body():
+    legacy = make_signal(use_environment=False)
+    explicit = make_signal(use_environment=False, marker_revision=1)
+    revised = make_signal(use_environment=False, marker_revision=2)
+    for before, after in zip(legacy, explicit):
+        np.testing.assert_array_equal(before, after)
+    for before, after in zip(legacy[1:], revised[1:]):
+        np.testing.assert_array_equal(before, after)
+    marker_begin = len(legacy[0]) - 24000 - 480
+    np.testing.assert_array_equal(legacy[0][marker_begin:marker_begin + 480],
+                                  np.tile(np.array([14000, -14000], dtype=np.int16), 240))
+    np.testing.assert_array_equal(legacy[0][:marker_begin], revised[0][:marker_begin])
+    np.testing.assert_array_equal(legacy[0][-24000:], revised[0][-24000:])
+    assert len(legacy[0]) == len(revised[0])
+    with pytest.raises(ValueError):
+        make_signal(marker_revision=3)
+
+
+@pytest.mark.parametrize('phase', [0., .25, .5, .75])
+def test_band_limited_marker_does_not_cancel_at_valid_asrc_phases(phase):
+    signal, *_ = make_signal(use_environment=False, marker_revision=2)
+    marker = signal[-24480:-24000]
+    capture = np.rint(np.interp(np.arange(479) + phase, np.arange(480), marker)).astype('<i2')
+    assert continuous_zero_run_count(capture)[0] == 0
+
+
+def test_legacy_marker_null_is_reproducible_and_real_silence_still_fails():
+    signal, *_ = make_signal(use_environment=False, marker_revision=1)
+    marker = signal[-24480:-24000]
+    capture = np.rint(np.interp(np.arange(479) + .5, np.arange(480), marker)).astype('<i2')
+    assert continuous_zero_run_count(capture) == (1, 479)
+    revised, *_ = make_signal(use_environment=False, marker_revision=2)
+    broken = revised[-24480:-24000].copy()
+    broken[150:214] = 0
+    assert continuous_zero_run_count(broken)[0] == 1
+
+
 def test_capture_statistics_handles_int16_min_and_streaming_memory():
     samples = np.array([-32768, 0, 100, -100], dtype=np.int16)
     stats = capture_statistics(samples, chunk_size=1)
