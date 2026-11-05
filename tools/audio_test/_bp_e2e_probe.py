@@ -25,9 +25,8 @@ DEVICE_STATE_ACTIVE = 1
 AUDCLNT_SHAREMODE_SHARED = 0
 AUDCLNT_SHAREMODE_EXCLUSIVE = 1
 AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM = 0x80000000
-# Request the shared-mode RAW processing category so Windows audio
-# enhancements/noise gates cannot turn a steady test tone into silence.
-AUDCLNT_STREAMFLAGS_RAW = 0x00080000
+# RAW is an AudioClientProperties option, not an Initialize stream flag.
+AUDCLNT_STREAMOPTIONS_RAW = 0x1
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -146,6 +145,58 @@ class IAudioClient(IUnknown):
         COMMETHOD([], HRESULT, "GetService", (['in'], POINTER(GUID), 'riid'),
                   (['out'], POINTER(c_void_p), 'ppv')),
     ]
+
+
+class AudioClientProperties(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", c_uint32),
+        ("bIsOffload", c_int),
+        ("eCategory", c_int),
+        ("Options", c_uint32),
+    ]
+
+
+class IAudioClient2(IAudioClient):
+    _iid_ = GUID("{726778CD-F60A-4EDA-82DE-E47610CD78AA}")
+    _methods_ = [
+        COMMETHOD([], HRESULT, "IsOffloadCapable", (['in'], c_int, 'category'),
+                  (['out'], POINTER(c_int), 'capable')),
+        COMMETHOD([], HRESULT, "SetClientProperties",
+                  (['in'], POINTER(AudioClientProperties), 'properties')),
+        COMMETHOD([], HRESULT, "GetBufferSizeLimits",
+                  (['in'], POINTER(WAVEFORMATEX), 'format'),
+                  (['in'], c_int, 'eventDriven'),
+                  (['out'], POINTER(c_longlong), 'minimum'),
+                  (['out'], POINTER(c_longlong), 'maximum')),
+    ]
+
+
+def initialize_audio_client(client, *, exclusive, use_mix=False, raw=True):
+    """Initialize a probe stream; requested RAW processing must succeed.
+
+    BP1/BP2 expose native 48kHz mono PCM16. RAW bypasses the shared processing
+    chain and uses that native format, rather than the processed stereo mix
+    format (which this endpoint rejects for RAW). RAW never silently falls
+    back to processed audio. Pass raw=False to measure the ordinary mix path.
+    """
+    shared_raw = raw and not exclusive
+    if shared_raw:
+        properties = AudioClientProperties(
+            ctypes.sizeof(AudioClientProperties), 0, 0, AUDCLNT_STREAMOPTIONS_RAW
+        )
+        client.QueryInterface(IAudioClient2).SetClientProperties(byref(properties))
+    fmt = (
+        get_mix_format(client)
+        if not exclusive and not shared_raw and use_mix
+        else WAVEFORMATEX(1, 1, 48000, 96000, 2, 16, 0)
+    )
+    flags = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM if not exclusive and not shared_raw else 0
+    client.Initialize(
+        AUDCLNT_SHAREMODE_EXCLUSIVE if exclusive else AUDCLNT_SHAREMODE_SHARED,
+        flags, 1_000_000 if exclusive else 10_000_000,
+        1_000_000 if exclusive else 0, byref(fmt), None,
+    )
+    return fmt
 
 
 class IAudioRenderClient(IUnknown):
@@ -511,16 +562,16 @@ def main():
         exclusive = os.environ.get("BP_E2E_EXCLUSIVE") == "1"
         capture_mix = (not exclusive and
                        os.environ.get("BP_E2E_CAPTURE_MIX", "1") != "0")
-        fmt = (WAVEFORMATEX(1, 1, 48000, 96000, 2, 16, 0) if exclusive else
-               (get_mix_format(capture_client) if capture_mix else
-                WAVEFORMATEX(1, 1, 48000, 96000, 2, 16, 0)))
-        capture_flags = 0 if exclusive else AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
-        if not exclusive and os.environ.get("BP_E2E_RAW", "1") != "0":
-            capture_flags |= AUDCLNT_STREAMFLAGS_RAW
-        capture_client.Initialize(
-            AUDCLNT_SHAREMODE_EXCLUSIVE if exclusive else AUDCLNT_SHAREMODE_SHARED,
-            capture_flags, 1_000_000 if exclusive else 10_000_000,
-            1_000_000 if exclusive else 0, byref(fmt), None)
+        try:
+            fmt = initialize_audio_client(
+                capture_client, exclusive=exclusive, use_mix=capture_mix,
+                raw=os.environ.get("BP_E2E_RAW", "1") != "0",
+            )
+        except Exception:
+            send_control(port, 0x26, b"\x00", drain=0.05)
+            port.close()
+            raise
+        capture_mix = int(fmt.wFormatTag) == 3
         capture = get_service(capture_client, GUID("{C8ADBD64-E71E-48A0-A4DE-185C395CD317}"), IAudioCaptureClient)
         capture_client.Start()
         captured = bytearray()
@@ -572,38 +623,24 @@ def main():
     active_end = max(active_start, len(signal) - rate // 2)
     render_client = activate_client(render_id)
     capture_client = activate_client(capture_id)
-    # Windows shared-mode clients use the endpoint's mix format for the
-    # application buffer.  Query that format instead of guessing a packed
-    # PCM16 layout; this keeps the probe aligned with the host audio engine
-    # while AUTOCONVERTPCM remains enabled for ordinary applications.
     exclusive = os.environ.get("BP_E2E_EXCLUSIVE") == "1"
     render_mix = (not exclusive and
                   os.environ.get("BP_E2E_RENDER_MIX", "1") != "0")
     capture_mix = (not exclusive and
                    os.environ.get("BP_E2E_CAPTURE_MIX", "1") != "0")
-    render_fmt = (WAVEFORMATEX(1, 1, 48000, 96000, 2, 16, 0) if exclusive else
-                  (get_mix_format(render_client) if render_mix else
-                   WAVEFORMATEX(1, 1, 48000, 96000, 2, 16, 0)))
-    capture_fmt = (WAVEFORMATEX(1, 1, 48000, 96000, 2, 16, 0) if exclusive else
-                   (get_mix_format(capture_client) if capture_mix else
-                    WAVEFORMATEX(1, 1, 48000, 96000, 2, 16, 0)))
-    flags = 0 if exclusive else AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
-    if not exclusive and os.environ.get("BP_E2E_RAW", "1") != "0":
-        flags |= AUDCLNT_STREAMFLAGS_RAW
-    share_mode = (AUDCLNT_SHAREMODE_EXCLUSIVE if exclusive
-                  else AUDCLNT_SHAREMODE_SHARED)
-    duration = 1_000_000 if exclusive else 10_000_000
-    periodicity = 1_000_000 if exclusive else 0
-    render_client.Initialize(share_mode, flags, duration, periodicity,
-                             byref(render_fmt), None)
-    capture_client.Initialize(share_mode, flags, duration, periodicity,
-                              byref(capture_fmt), None)
+    raw = os.environ.get("BP_E2E_RAW", "1") != "0"
+    render_fmt = initialize_audio_client(
+        render_client, exclusive=exclusive, use_mix=render_mix, raw=raw)
+    capture_fmt = initialize_audio_client(
+        capture_client, exclusive=exclusive, use_mix=capture_mix, raw=raw)
+    render_mix = int(render_fmt.wFormatTag) == 3
+    capture_mix = int(capture_fmt.wFormatTag) == 3
     render_size = int(render_client.GetBufferSize())
     capture_size = int(capture_client.GetBufferSize())
     render = get_service(render_client, GUID("{F294ACFC-3146-4483-A7BF-ADDCA7C260E2}"), IAudioRenderClient)
     capture = get_service(capture_client, GUID("{C8ADBD64-E71E-48A0-A4DE-185C395CD317}"), IAudioCaptureClient)
     mode_label = ("WASAPI_EXCLUSIVE" if exclusive
-                  else "WASAPI_SHARED_AUTOCONVERT")
+                  else "WASAPI_SHARED_RAW" if raw else "WASAPI_SHARED_AUTOCONVERT")
     print(mode_label, {"render_buffer_frames": render_size,
                        "capture_buffer_frames": capture_size,
                        "render_format": format_desc(render_fmt),
@@ -625,6 +662,7 @@ def main():
     # Preserve a complete scheduling period in timer-driven exclusive mode.
     # Refilling up to an interpolated USB read cursor can overwrite samples
     # still in flight with PCM from the next lap of the endpoint buffer.
+    periodicity = 1_000_000 if exclusive else 0
     render_guard = (int(math.ceil(periodicity * rate / 10_000_000))
                     if exclusive else 0)
     render_quantum = rate // 1000 if exclusive else 1

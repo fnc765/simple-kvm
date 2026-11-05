@@ -393,8 +393,10 @@ def test_audio_profile_exposes_boot_hid_idle_states_for_queued_service():
         assert name in source
 
 
-def test_main_cpp_has_fail_safe_absolute_button_release_timeout():
+def test_main_cpp_wires_fail_safe_all_hid_timeout_service():
     text = _read("main.cpp")
-    assert "ABS_INPUT_TIMEOUT_MS" in text
+    assert "HID_INPUT_TIMEOUT_MS" in text
     assert "g_last_uart_activity_ms" in text
-    assert re.search(r"release_report\s*\[\s*0\s*\]\s*=\s*0", text)
+    assert "hid_input_timeout_service(millis());" in text
+    # The unchanged product functions are executed for both firmware profiles
+    # by bp2_hid_tests.cpp; this only checks the loop integration boundary.

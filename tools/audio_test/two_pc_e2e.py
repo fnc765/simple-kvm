@@ -51,6 +51,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--stage", default="intermediate")
     parser.add_argument("--seconds", type=float, default=10.0)
+    parser.add_argument("--waveform-revision", type=int, choices=(1, 2), default=1,
+                        help="1: original Nyquist marker; 2: band-limited marker for continuous stress")
     parser.add_argument("--output-dir", type=Path)
     return parser.parse_args(argv)
 
@@ -72,6 +74,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
         "started_at": utc_now(),
         "stage": plan.stage,
         "planned_seconds": plan.planned_seconds,
+        "waveform_revision": args.waveform_revision,
         "target_capture_seconds": float(plan.planned_seconds or 0.0)
         + capture_margin_seconds,
         "controller": os.environ.get("COMPUTERNAME", ""),
@@ -129,7 +132,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
             target_request.request_id, {"armed"}, timeout=20.0
         )
 
-        signal, preamble, tone, prbs = make_signal()
+        signal, preamble, tone, prbs = make_signal(marker_revision=args.waveform_revision)
         run_id = int(time.time() * 1000) & 0xFFFFFFFF
 
         def before_start(_: dict[str, object]) -> None:

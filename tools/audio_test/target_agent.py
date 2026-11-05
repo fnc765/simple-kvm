@@ -195,6 +195,7 @@ def _start_capture(request: TargetRequest, root: Path) -> dict[str, object]:
         endpoint_id,
         request.planned_seconds,
         exclusive=bool(request.options.get("exclusive", True)),
+        raw=bool(request.options.get("raw", True)),
         on_armed=armed,
         wait_until=go_path.exists if request.options.get("wait_for_go", True) else None,
         arm_timeout_s=float(request.options.get("arm_timeout_seconds", 20.0)),

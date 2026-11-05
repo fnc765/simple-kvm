@@ -732,11 +732,16 @@ static int test_mouse_queue_mixed_overload_accounting()
   return 0;
 }
 
+int run_bp2_spi_poll_tests();
+int run_bp2_hid_tests();
+
 int main()
 {
   if (test_crc_and_frame() != 0 || test_sequence_and_session() != 0 ||
       test_boot_barrier_and_sync_retry() != 0 ||
       test_receive_pipeline() != 0 ||
+      run_bp2_spi_poll_tests() != 0 ||
+      run_bp2_hid_tests() != 0 ||
       test_hid_report_queue() != 0 ||
       test_mouse_queue_delta_and_wheel_order() != 0 ||
       test_mouse_queue_high_rate_release() != 0 ||

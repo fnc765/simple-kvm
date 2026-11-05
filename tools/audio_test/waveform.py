@@ -5,7 +5,9 @@ import os
 import numpy as np
 
 
-def make_signal(*, use_environment=True):
+def make_signal(*, use_environment=True, marker_revision=1):
+    if marker_revision not in (1, 2):
+        raise ValueError("marker_revision must be 1 or 2")
     rate = 48000
     if use_environment and os.environ.get("BP_E2E_SIMPLE_TONE") == "1":
         tone_n = int(float(os.environ.get("BP_E2E_TONE_SECONDS", "5")) * rate)
@@ -30,7 +32,14 @@ def make_signal(*, use_environment=True):
     k = (10000.0 - 100.0) / (chirp_n / rate)
     chirp = np.round(7000.0 * np.sin(2.0 * math.pi * (100.0 * chirp_t + 0.5 * k * chirp_t * chirp_t))).astype(np.int16)
     prbs = rng.integers(-12000, 12001, size=2 * rate, dtype=np.int16)
-    end_marker = np.tile(np.array([14000, -14000], dtype=np.int16), 240)
+    # Keep revision 1 reproducible: its Nyquist marker can cancel completely
+    # at a valid half-sample ASRC phase. Revision 2 uses a band-limited marker
+    # so the unchanged continuous-quiet gate can detect actual missing PCM.
+    end_marker = (
+        np.tile(np.array([14000, -14000], dtype=np.int16), 240)
+        if marker_revision == 1 else
+        np.rint(14000 * np.sin(2 * math.pi * 1000 * np.arange(480) / rate)).astype(np.int16)
+    )
     signal = np.concatenate([silence, preamble, tone, chirp, prbs, end_marker, silence])
     return signal, preamble, tone, prbs
 

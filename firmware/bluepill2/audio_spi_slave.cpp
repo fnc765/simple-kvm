@@ -191,9 +191,16 @@ void audio_spi_slave_poll(uint32_t now_ms)
   }
 
   const AudioStatus status = g_pipeline.status();
+  // CRC generation must not mask UART RX interrupts. At 115200 baud the
+  // next byte arrives every 87 us; keeping the encoder in the critical
+  // section can overrun USART1 and silently lose HID packets.
+  uint8_t prepared_status[kSpiFrameBytes];
+  (void)encode_status_frame(status, prepared_status, sizeof(prepared_status));
   noInterrupts();
   const uint8_t inactive = static_cast<uint8_t>(g_tx_active ^ 1U);
-  (void)encode_status_frame(status, g_tx_frame[inactive], kSpiFrameBytes);
+  // Select the inactive slot after encoding: DMA may switch slots while
+  // the frame is being prepared. Only the bounded copy needs protection.
+  memcpy(g_tx_frame[inactive], prepared_status, sizeof(prepared_status));
   interrupts();
 }
 
